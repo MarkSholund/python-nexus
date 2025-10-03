@@ -61,7 +61,7 @@ PYPI_UPSTREAM = "https://pypi.org"
 - **Local cache directories**
 
 ```python
-CACHE_DIR = Path("/data/search/storage/nexus/cache")
+CACHE_DIR = Path("~/.cache")
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
 ```
@@ -80,11 +80,6 @@ uvicorn nexus:app --host 0.0.0.0 --port 8000
 
 ### Endpoints
 
-- **Ping**
-
-```
-GET /nexus/ping.xml
-```
 
 - **Maven proxy**
 
