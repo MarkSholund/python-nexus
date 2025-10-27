@@ -21,123 +21,199 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pathlib import Path
 import httpx
+import gzip
+import hashlib
+import re
+import email.utils as eut
+from datetime import datetime, timezone
 
 app = FastAPI()
 
-# Upstreams
+# -------------------
+# Configuration
+# -------------------
 UPSTREAM_ENABLED = True
 MAVEN_UPSTREAM = "https://repo1.maven.org/maven2"
 PYPI_UPSTREAM = "https://pypi.org"
 
-# Cache dirs
-CACHE_DIR = Path("./cache")
+CACHE_DIR = Path("cache")
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
 
+# Compress files larger than this threshold (1MB)
+COMPRESS_THRESHOLD = 1 * 1024 * 1024
+COMPRESSED_EXT = ".gz"
 
 # -------------------
-# Maven Proxy
+# Utilities
 # -------------------
-@app.get("/maven2/{full_path:path}")
-async def proxy_maven(full_path: str):
-    local_path = MAVEN_CACHE / full_path
-    if local_path.exists():
-        return FileResponse(local_path)
+def rewrite_index_html(html: str, base_url: str) -> str:
+    """Rewrite href links in PyPI simple indexes to go through this proxy."""
+    html = re.sub(
+        r'href=["\']https://files\.pythonhosted\.org/([^"\']+)["\']',
+        lambda m: f'href="{base_url}/packages/{m.group(1)}"',
+        html,
+    )
+    html = re.sub(
+        r'href=["\']https://pypi\.org/([^"\']+)["\']',
+        lambda m: f'href="{base_url}/pypi/{m.group(1)}"',
+        html,
+    )
+    return html
 
-    if UPSTREAM_ENABLED:
-        upstream_url = f"{MAVEN_UPSTREAM}/{full_path}"
-        local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-            try:
-                r = await client.get(upstream_url)
-            except httpx.RequestError:
-                raise HTTPException(
-                    status_code=502, detail="Upstream request failed")
+async def fetch_and_cache(url: str, dest: Path) -> Path:
+    """Fetch remote resource and cache it locally (compress if large)."""
+    gz_path = dest.with_suffix(dest.suffix + COMPRESSED_EXT)
+    if dest.exists() or gz_path.exists():
+        return dest
 
-            if r.status_code == 200:
-                local_path.write_bytes(r.content)
-                return FileResponse(local_path, media_type=r.headers.get("content-type"))
-            elif r.status_code == 404:
-                raise HTTPException(
-                    status_code=404, detail="Artifact not found")
-            else:
-                raise HTTPException(
-                    status_code=502, detail=f"Upstream error {r.status_code}")
+    if not UPSTREAM_ENABLED:
+        raise HTTPException(status_code=404, detail=f"Offline and cache miss: {dest}")
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
+        r = await client.get(url)
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=f"Upstream error: {url}")
+        content = r.content
+
+    # Compress if large
+    if len(content) > COMPRESS_THRESHOLD:
+        with gzip.open(gz_path, "wb") as f:
+            f.write(content)
+        return gz_path
     else:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+        dest.write_bytes(content)
+        return dest
+
+
+def open_cached_file(path: Path) -> bytes:
+    """Return bytes from cached file (decompressing if gzipped)."""
+    gz_path = path.with_suffix(path.suffix + COMPRESSED_EXT)
+    if path.exists():
+        return path.read_bytes()
+    elif gz_path.exists():
+        with gzip.open(gz_path, "rb") as f:
+            return f.read()
+    raise FileNotFoundError(path)
+
+
+def make_etag_and_last_modified(path: Path):
+    """Generate ETag and Last-Modified headers from cached file metadata."""
+    gz = path.with_suffix(path.suffix + COMPRESSED_EXT)
+    if not path.exists() and gz.exists():
+        path = gz
+    if not path.exists():
+        return None, None
+
+    stat = path.stat()
+    last_modified = eut.format_datetime(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
+    etag = hashlib.md5(f"{path.name}-{stat.st_size}-{stat.st_mtime}".encode()).hexdigest()
+    return etag, last_modified
+
+
+def file_headers(path: Path) -> dict:
+    """Convenience wrapper to build consistent headers for any cached file."""
+    etag, last_modified = make_etag_and_last_modified(path)
+    headers = {}
+    if etag:
+        headers["ETag"] = etag
+    if last_modified:
+        headers["Last-Modified"] = last_modified
+    return headers
 
 # -------------------
-# PyPI Proxy
+# PyPI Routes
 # -------------------
+
+@app.get("/pypi/simple/")
+async def pypi_root_index():
+    """Cache and serve the root /simple/ index."""
+    local_path = PYPI_CACHE / "simple" / "index.html"
+    if not local_path.exists():
+        if not UPSTREAM_ENABLED:
+            raise HTTPException(status_code=404)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            r = await client.get(f"{PYPI_UPSTREAM}/simple/")
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(r.text, encoding="utf-8")
+    return FileResponse(local_path, media_type="text/html", headers=file_headers(local_path))
 
 
 @app.get("/pypi/simple/{package}/")
-async def proxy_pypi_simple(package: str):
+async def pypi_package_index(package: str):
+    """Serve /simple/{package}/ index and rewrite links."""
     local_path = PYPI_CACHE / "simple" / package / "index.html"
-    if local_path.exists():
-        return FileResponse(local_path, media_type="text/html")
+    if not local_path.exists():
+        if not UPSTREAM_ENABLED:
+            raise HTTPException(status_code=404)
+        url = f"{PYPI_UPSTREAM}/simple/{package}/"
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+            r = await client.get(url)
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code)
+            rewritten = rewrite_index_html(r.text, base_url="/pypi")
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(rewritten, encoding="utf-8")
+    return FileResponse(local_path, media_type="text/html", headers=file_headers(local_path))
 
-    if UPSTREAM_ENABLED:
-        upstream_url = f"{PYPI_UPSTREAM}/simple/{package}/"
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(upstream_url)
-            if r.status_code == 200:
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_text(r.text, encoding="utf-8")
-                return Response(r.text, media_type="text/html")
-            elif r.status_code == 404:
-                raise HTTPException(
-                    status_code=404, detail="Package not found")
-            else:
-                raise HTTPException(
-                    status_code=502, detail=f"Upstream error {r.status_code}")
-    else:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+
+@app.get("/pypi/packages/{path:path}")
+async def pypi_artifact(path: str):
+    """Serve cached .whl, .tar.gz, .zip, .metadata, etc."""
+    local_path = PYPI_CACHE / "packages" / path
+    if not (local_path.exists() or local_path.with_suffix(local_path.suffix + COMPRESSED_EXT).exists()):
+        await fetch_and_cache(f"https://files.pythonhosted.org/{path}", local_path)
+    try:
+        data = open_cached_file(local_path)
+        return Response(content=data, headers=file_headers(local_path))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Artifact not found in cache")
 
 
 @app.get("/pypi/{package}/json")
-async def proxy_pypi_json(package: str):
-    local_path = PYPI_CACHE / "json" / f"{package}.json"
-    if local_path.exists():
-        return FileResponse(local_path, media_type="application/json")
-
-    if UPSTREAM_ENABLED:
-        upstream_url = f"{PYPI_UPSTREAM}/pypi/{package}/json"
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            r = await client.get(upstream_url)
-            if r.status_code == 200:
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_text(r.text, encoding="utf-8")
-                return Response(r.text, media_type="application/json")
-            elif r.status_code == 404:
-                raise HTTPException(
-                    status_code=404, detail="Package not found")
-            else:
-                raise HTTPException(
-                    status_code=502, detail=f"Upstream error {r.status_code}")
-    else:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+async def pypi_package_json(package: str):
+    """Cache and serve /pypi/{package}/json metadata."""
+    local_path = PYPI_CACHE / package / "index.json"
+    if not local_path.exists():
+        await fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/json", local_path)
+    return FileResponse(local_path, media_type="application/json", headers=file_headers(local_path))
 
 
-@app.get("/packages/{path:path}")
-async def proxy_pypi_package(path: str):
-    local_path = PYPI_CACHE / "packages" / path
-    if local_path.exists():
-        return FileResponse(local_path)
+@app.get("/pypi/{package}/{version}/json")
+async def pypi_package_version_json(package: str, version: str):
+    """Cache and serve /pypi/{package}/{version}/json metadata."""
+    local_path = PYPI_CACHE / package / version / "index.json"
+    if not local_path.exists():
+        await fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json", local_path)
+    return FileResponse(local_path, media_type="application/json", headers=file_headers(local_path))
 
-    if UPSTREAM_ENABLED:
-        upstream_url = f"{PYPI_UPSTREAM}/packages/{path}"
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-            r = await client.get(upstream_url)
-            if r.status_code == 200:
-                local_path.write_bytes(r.content)
-                return FileResponse(local_path, media_type=r.headers.get("content-type"))
-            elif r.status_code == 404:
-                raise HTTPException(status_code=404, detail="File not found")
-            else:
-                raise HTTPException(
-                    status_code=502, detail=f"Upstream error {r.status_code}")
-    else:
-        raise HTTPException(status_code=404, detail="Artifact not found")
+# -------------------
+# Maven Routes
+# -------------------
+
+@app.get("/maven2/{path:path}")
+async def maven_proxy(path: str):
+    """Serve Maven artifacts with caching and headers."""
+    local_path = MAVEN_CACHE / path
+    if not (local_path.exists() or local_path.with_suffix(local_path.suffix + COMPRESSED_EXT).exists()):
+        await fetch_and_cache(f"{MAVEN_UPSTREAM}/{path}", local_path)
+    try:
+        data = open_cached_file(local_path)
+        return Response(content=data, headers=file_headers(local_path))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404)
+
+# -------------------
+# Root
+# -------------------
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "message": "Local caching proxy for PyPI and Maven with ETag, Last-Modified, and compression"
+    }
