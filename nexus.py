@@ -17,15 +17,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse
 from pathlib import Path
 import httpx
-import gzip
 import hashlib
-import re
-import email.utils as eut
-from datetime import datetime, timezone
+from datetime import datetime
 
 app = FastAPI()
 
@@ -40,100 +39,104 @@ CACHE_DIR = Path("cache")
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
 
-# Compress files larger than this threshold (1MB)
-COMPRESS_THRESHOLD = 1 * 1024 * 1024
-COMPRESSED_EXT = ".gz"
-
 # -------------------
 # Utilities
 # -------------------
+
+
 def rewrite_index_html(html: str, base_url: str) -> str:
-    """Rewrite href links in PyPI simple indexes to go through this proxy."""
-    html = re.sub(
-        r'href=["\']https://files\.pythonhosted\.org/([^"\']+)["\']',
-        lambda m: f'href="{base_url}/packages/{m.group(1)}"',
-        html,
-    )
-    html = re.sub(
-        r'href=["\']https://pypi\.org/([^"\']+)["\']',
-        lambda m: f'href="{base_url}/pypi/{m.group(1)}"',
-        html,
-    )
-    return html
+    """Rewrite PyPI simple index links to route through proxy."""
+    soup = BeautifulSoup(html, "html.parser")
+    for a in soup.find_all("a", href=True):
+        orig = a["href"]
+        parsed = urlparse(orig)
+        new_href = orig  # default: unchanged
+
+        if parsed.scheme in ("http", "https"):
+            host = parsed.netloc.lower()
+            if host.endswith("files.pythonhosted.org") and "/packages/" in parsed.path:
+                suffix = parsed.path.split("/packages/", 1)[1]
+                new_href = f"{base_url}/packages/{suffix}"
+            elif host.endswith("pypi.org"):
+                path = parsed.path.lstrip("/")
+                new_href = f"{base_url}/{path}" if path else f"{base_url}/"
+        else:
+            # relative URL
+            rel = orig.lstrip("/")
+            if rel.startswith("packages/"):
+                suffix = rel[len("packages/"):]
+                new_href = f"{base_url}/packages/{suffix}"
+            elif rel.startswith("pypi/"):
+                new_href = f"{base_url}/{rel}"
+
+        # preserve query and fragment
+        if parsed.query:
+            new_href += "?" + parsed.query
+        if parsed.fragment:
+            new_href += "#" + parsed.fragment
+
+        a["href"] = new_href
+
+    return str(soup)
 
 
 async def fetch_and_cache(url: str, dest: Path) -> Path:
-    """Fetch remote resource and cache it locally (compress if large)."""
-    gz_path = dest.with_suffix(dest.suffix + COMPRESSED_EXT)
-    if dest.exists() or gz_path.exists():
+    """Fetch remote resource and cache it locally (no compression)."""
+    if dest.exists():
         return dest
-
     if not UPSTREAM_ENABLED:
-        raise HTTPException(status_code=404, detail=f"Offline and cache miss: {dest}")
+        raise HTTPException(
+            status_code=404, detail=f"Offline and cache miss: {dest}")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
         r = await client.get(url)
         if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=f"Upstream error: {url}")
-        content = r.content
-
-    # Compress if large
-    if len(content) > COMPRESS_THRESHOLD:
-        with gzip.open(gz_path, "wb") as f:
-            f.write(content)
-        return gz_path
-    else:
-        dest.write_bytes(content)
-        return dest
+            raise HTTPException(status_code=r.status_code,
+                                detail=f"Upstream error: {url}")
+        dest.write_bytes(r.content)
+    return dest
 
 
 def open_cached_file(path: Path) -> bytes:
-    """Return bytes from cached file (decompressing if gzipped)."""
-    gz_path = path.with_suffix(path.suffix + COMPRESSED_EXT)
     if path.exists():
         return path.read_bytes()
-    elif gz_path.exists():
-        with gzip.open(gz_path, "rb") as f:
-            return f.read()
     raise FileNotFoundError(path)
 
 
 def make_etag_and_last_modified(path: Path):
-    """Generate ETag and Last-Modified headers from cached file metadata."""
-    gz = path.with_suffix(path.suffix + COMPRESSED_EXT)
-    if not path.exists() and gz.exists():
-        path = gz
-    if not path.exists():
-        return None, None
-
     stat = path.stat()
-    last_modified = eut.format_datetime(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc))
-    etag = hashlib.md5(f"{path.name}-{stat.st_size}-{stat.st_mtime}".encode()).hexdigest()
+    etag = hashlib.sha256(
+        f"{path.name}-{stat.st_mtime}-{stat.st_size}".encode("utf-8")).hexdigest()
+    last_modified = datetime.utcfromtimestamp(
+        stat.st_mtime).strftime("%a, %d %b %Y %H:%M:%S GMT")
     return etag, last_modified
 
 
 def file_headers(path: Path) -> dict:
-    """Convenience wrapper to build consistent headers for any cached file."""
     etag, last_modified = make_etag_and_last_modified(path)
-    headers = {}
-    if etag:
-        headers["ETag"] = etag
-    if last_modified:
-        headers["Last-Modified"] = last_modified
+    headers = {"ETag": etag, "Last-Modified": last_modified}
     return headers
 
 # -------------------
 # PyPI Routes
 # -------------------
 
+
+@app.get("/nexus/ping.xml")
+async def ping():
+    return Response(content="""<?xml version="1.0" encoding="UTF-8"?>
+<monitor>
+    <service name="FastAPI Nexus">UP</service>
+    <health>UP</health>
+</monitor>
+""", media_type="application/xml")
+
+
 @app.get("/pypi/simple/")
 async def pypi_root_index():
-    """Cache and serve the root /simple/ index."""
     local_path = PYPI_CACHE / "simple" / "index.html"
     if not local_path.exists():
-        if not UPSTREAM_ENABLED:
-            raise HTTPException(status_code=404)
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             r = await client.get(f"{PYPI_UPSTREAM}/simple/")
             if r.status_code != 200:
@@ -145,11 +148,8 @@ async def pypi_root_index():
 
 @app.get("/pypi/simple/{package}/")
 async def pypi_package_index(package: str):
-    """Serve /simple/{package}/ index and rewrite links."""
     local_path = PYPI_CACHE / "simple" / package / "index.html"
     if not local_path.exists():
-        if not UPSTREAM_ENABLED:
-            raise HTTPException(status_code=404)
         url = f"{PYPI_UPSTREAM}/simple/{package}/"
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             r = await client.get(url)
@@ -163,20 +163,26 @@ async def pypi_package_index(package: str):
 
 @app.get("/pypi/packages/{path:path}")
 async def pypi_artifact(path: str):
-    """Serve cached .whl, .tar.gz, .zip, .metadata, etc."""
     local_path = PYPI_CACHE / "packages" / path
-    if not (local_path.exists() or local_path.with_suffix(local_path.suffix + COMPRESSED_EXT).exists()):
-        await fetch_and_cache(f"https://files.pythonhosted.org/{path}", local_path)
+    if not local_path.exists():
+        upstream_path = path
+        if upstream_path.startswith("packages/"):
+            upstream_path = upstream_path[len("packages/"):]
+        await fetch_and_cache(f"https://files.pythonhosted.org/packages/{upstream_path}", local_path)
+
     try:
         data = open_cached_file(local_path)
-        return Response(content=data, headers=file_headers(local_path))
+        headers = file_headers(local_path)
+        # Add content-disposition for wheels/archives
+        if local_path.suffix in [".whl", ".zip", ".gz", ".tar"]:
+            headers["Content-Disposition"] = f'attachment; filename="{local_path.name}"'
+        return Response(content=data, headers=headers, media_type="application/octet-stream")
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Artifact not found in cache")
+        raise HTTPException(status_code=404, detail="Artifact not found")
 
 
 @app.get("/pypi/{package}/json")
 async def pypi_package_json(package: str):
-    """Cache and serve /pypi/{package}/json metadata."""
     local_path = PYPI_CACHE / package / "index.json"
     if not local_path.exists():
         await fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/json", local_path)
@@ -185,7 +191,6 @@ async def pypi_package_json(package: str):
 
 @app.get("/pypi/{package}/{version}/json")
 async def pypi_package_version_json(package: str, version: str):
-    """Cache and serve /pypi/{package}/{version}/json metadata."""
     local_path = PYPI_CACHE / package / version / "index.json"
     if not local_path.exists():
         await fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json", local_path)
@@ -195,15 +200,15 @@ async def pypi_package_version_json(package: str, version: str):
 # Maven Routes
 # -------------------
 
+
 @app.get("/maven2/{path:path}")
 async def maven_proxy(path: str):
-    """Serve Maven artifacts with caching and headers."""
     local_path = MAVEN_CACHE / path
-    if not (local_path.exists() or local_path.with_suffix(local_path.suffix + COMPRESSED_EXT).exists()):
+    if not local_path.exists():
         await fetch_and_cache(f"{MAVEN_UPSTREAM}/{path}", local_path)
     try:
         data = open_cached_file(local_path)
-        return Response(content=data, headers=file_headers(local_path))
+        return Response(content=data, headers=file_headers(local_path), media_type="application/octet-stream")
     except FileNotFoundError:
         raise HTTPException(status_code=404)
 
@@ -211,9 +216,7 @@ async def maven_proxy(path: str):
 # Root
 # -------------------
 
+
 @app.get("/")
 async def root():
-    return {
-        "status": "ok",
-        "message": "Local caching proxy for PyPI and Maven with ETag, Last-Modified, and compression"
-    }
+    return {"status": "ok", "message": "Local caching proxy for PyPI and Maven (no compression)"}
