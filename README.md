@@ -8,14 +8,14 @@ A simple **FastAPI-based proxy server** for caching and serving Maven and PyPI a
 
 - **Maven Proxy**
   - Serves artifacts from a local cache.
-  - Fetches missing artifacts from [Maven Central](https://repo1.maven.org/maven2) if upstream is enabled.
+  - Fetches missing artifacts from [Maven Central](https://repo1.maven.org/maven2).
   - Returns appropriate HTTP status codes for missing or failed artifacts.
 
 - **PyPI Proxy**
   - Serves package index (`simple/`) and JSON metadata (`/json`) from a local cache.
   - Caches actual package files under `packages/`.
-  - Fetches missing packages from [PyPI](https://pypi.org) when upstream is enabled.
-
+  - Fetches missing packages from [PyPI](https://pypi.org).
+  - Supports conditional GET with ETag and Last-Modified headers.
 
 ---
 
@@ -38,18 +38,21 @@ source venv/bin/activate
 3. **Install dependencies**
 
 ```bash
-pip install fastapi httpx uvicorn
+pip install -r requirements.txt
 ```
+
+> Ensure `requirements.txt` includes at least:
+>
+> ```text
+> fastapi
+> uvicorn
+> httpx
+> beautifulsoup4
+> ```
 
 ---
 
 ## Configuration
-
-- **Upstream enabling/disabling**
-
-```python
-UPSTREAM_ENABLED = True
-```
 
 - **Upstream URLs**
 
@@ -61,7 +64,8 @@ PYPI_UPSTREAM = "https://pypi.org"
 - **Local cache directories**
 
 ```python
-CACHE_DIR = Path("~/.cache")
+from pathlib import Path
+CACHE_DIR = Path("/webroot/search/storage/cache")  # or use environment variable
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
 ```
@@ -75,11 +79,10 @@ Ensure these directories exist and are writable by the application.
 Run the FastAPI server using **Uvicorn**:
 
 ```bash
-uvicorn nexus:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Endpoints
-
 
 - **Maven proxy**
 
@@ -90,9 +93,11 @@ GET /maven2/{groupId}/{artifactId}/{version}/{artifact}.jar
 - **PyPI proxy**
 
 ```
-GET /pypi/simple/{package}/         # HTML index
-GET /pypi/{package}/json            # JSON metadata
-GET /packages/{path}                # Package files
+GET /pypi/simple/                   # Root HTML index
+GET /pypi/simple/{package}/          # Package index HTML
+GET /pypi/{package}/json             # Package JSON metadata
+GET /pypi/{package}/{version}/json   # Version-specific JSON
+GET /pypi/packages/{path}            # Package files (wheel, tar, zip, etc.)
 ```
 
 ---
@@ -100,8 +105,41 @@ GET /packages/{path}                # Package files
 ## Caching Behavior
 
 - Files are served from the local cache if they exist.
-- If a file is missing and upstream is enabled, it is downloaded, cached, and served.
-- Upstream errors return proper HTTP status codes (`404` for not found, `502` for other errors).
+- If a file is missing, it is downloaded, cached, and served.
+- Supports **ETag** and **Last-Modified** headers for conditional GET requests.
+- Upstream errors return proper HTTP status codes:
+  - `404` for not found
+  - `502` or upstream status code for other errors
+
+---
+
+## Logging
+
+- The app uses standard Python `logging`.
+- You can configure the logging format using:
+
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelprefix)s %(asctime)s | %(message)s",
+)
+```
+
+- The logs will show cache hits, upstream fetches, and errors.
+
+---
+
+## Environment Variables
+
+- You can override cache directory with:
+
+```bash
+export CACHE_DIR=/path/to/cache
+```
+
+- Default is `/webroot/search/storage/cache`.
 
 ---
 
@@ -130,7 +168,7 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
+# along with this program. If not, see <https://www.gnu.org/licenses/>
 ```
 
 ---
@@ -138,8 +176,8 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 ## Notes
 
 - Recommended for internal artifact caching and proxying.
-- Make sure cache directories have sufficient disk space for artifacts.
-- Timeout for upstream requests:  
-  - Maven: 60 seconds  
+- Ensure cache directories have sufficient disk space for artifacts.
+- Timeout for upstream requests:
+  - Maven: 60 seconds
   - PyPI package files: 120 seconds
-
+- Supports conditional GETs to reduce unnecessary bandwidth.
