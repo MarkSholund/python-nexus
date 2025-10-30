@@ -24,7 +24,7 @@ import httpx
 from app.config import config
 from app.utils import utils
 
-router = APIRouter(prefix="/pypi")
+router = APIRouter(prefix="/pypi", tags=["PyPI"])
 
 PYPI_UPSTREAM = "https://pypi.org"
 PYPI_CACHE = config.CACHE_DIR / "pypi"

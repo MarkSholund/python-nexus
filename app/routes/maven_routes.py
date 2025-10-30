@@ -24,7 +24,7 @@ from app.utils import utils
 MAVEN_UPSTREAM = "https://repo1.maven.org/maven2"
 MAVEN_CACHE = config.CACHE_DIR / "maven"
 
-router = APIRouter(prefix="/maven2")
+router = APIRouter(prefix="/maven2", tags=["Maven"])
 
 # -------------------
 # Maven Routes
