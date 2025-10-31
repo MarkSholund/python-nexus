@@ -65,7 +65,7 @@ PYPI_UPSTREAM = "https://pypi.org"
 
 ```python
 from pathlib import Path
-CACHE_DIR = Path("/webroot/search/storage/cache")  # or use environment variable
+CACHE_DIR = Path("cache")  # or use environment variable
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
 ```
@@ -139,7 +139,7 @@ logging.basicConfig(
 export CACHE_DIR=/path/to/cache
 ```
 
-- Default is `/webroot/search/storage/cache`.
+- Default is `cache`.
 
 ---
 
