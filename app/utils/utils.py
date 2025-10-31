@@ -21,23 +21,55 @@ from typing import Optional
 from fastapi import HTTPException, Request, Response
 from pathlib import Path
 import httpx
+import aiofiles
+import json
 import hashlib
 from datetime import datetime
+from http import HTTPMethod
+import logging
+
+logger = logging.getLogger('uvicorn')
 
 
-async def fetch_and_cache(url: str, dest: Path) -> Path:
-    """Fetch remote resource and cache it locally (no compression)."""
+async def fetch_and_cache(
+    url: str,
+    dest: Path,
+    method: HTTPMethod = HTTPMethod.GET,
+    data: bytes | None = None,
+    return_json: bool = False,
+    timeout: float = 60.0
+):
+    """
+    Fetch from upstream (GET or POST), save to local cache, optionally return JSON.
+    """
     if dest.exists():
+        if return_json:
+            async with aiofiles.open(dest, "r") as f:
+                content = await f.read()
+            return json.loads(content)
         return dest
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    async with httpx.AsyncClient(follow_redirects=True, timeout=120.0) as client:
-        r = await client.get(url)
-        if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code,
-                                detail=f"Upstream error: {url}")
-        dest.write_bytes(r.content)
-    return dest
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        try:
+            if method == HTTPMethod.POST:
+                resp = await client.post(url, content=data)
+            else:
+                resp = await client.get(url)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code,
+                                detail=f"Upstream error: {url}") from e
+
+    if return_json:
+        content = resp.text
+        async with aiofiles.open(dest, "w") as f:
+            await f.write(content)
+        return json.loads(content)
+    else:
+        dest.write_bytes(resp.content)
+        return dest
 
 
 def open_cached_file(path: Path) -> bytes:

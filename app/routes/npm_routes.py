@@ -18,29 +18,49 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from fastapi import APIRouter, HTTPException, Request
+from pathlib import Path
 from app.config import config
 from app.utils import utils
+from urllib.parse import quote
+from http import HTTPMethod
 
 NPM_UPSTREAM = "https://registry.npmjs.org"
 NPM_CACHE = config.CACHE_DIR / "npm"
 
-router = APIRouter(prefix="/npm", tags=["NPM"])
+router = APIRouter(prefix="/npm", tags=["npm"])
+
+
+# -------------------
+# Helpers
+# -------------------
+
+def encode_scoped_package(pkg: str) -> str:
+    """
+    Encode scoped NPM packages correctly for upstream URLs.
+    '@types/react' -> '%40types/react'
+    'lodash' -> 'lodash'
+    """
+    if pkg.startswith("@") and "/" in pkg:
+        scope, name = pkg.split("/", 1)
+        return f"{quote(scope)}/{name}"
+    return quote(pkg)
+
 
 # -------------------
 # NPM Routes
 # -------------------
 
-
-@router.get("/{package_name}")
-async def npm_package_metadata(package_name: str, request: Request):
+@router.get("/{package:path}")
+async def npm_package_metadata(package: str, request: Request):
     """
-    Serve and cache npm package metadata (package.json-style).
-    Example: /npm/react
+    Serve package metadata (package.json-style).
+    Example: GET /npm/lodash or /npm/@types/react
+    Only cache metadata; do NOT prefetch tgz files.
     """
-    local_path = NPM_CACHE / f"{package_name}.json"
-    upstream_url = f"{NPM_UPSTREAM}/{package_name}"
+    local_path = NPM_CACHE / Path(*package.split("/")) / "index.json"
 
     if not local_path.exists():
+        upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}"
         await utils.fetch_and_cache(upstream_url, local_path)
 
     try:
@@ -49,19 +69,43 @@ async def npm_package_metadata(package_name: str, request: Request):
         raise HTTPException(status_code=404)
 
 
-@router.get("/{package_name}/-/{tarball}")
-async def npm_tarball(package_name: str, tarball: str, request: Request):
+@router.get("/{package:path}/-/{tarball}")
+async def npm_package_tarball(package: str, tarball: str, request: Request):
     """
-    Serve and cache npm tarballs (.tgz)
-    Example: /npm/react/-/react-18.2.0.tgz
+    Serve tarball files on-demand.
+    Example: GET /npm/lodash/-/lodash-4.17.21.tgz
+             GET /npm/@types/react/-/react-18.2.21.tgz
     """
-    local_path = NPM_CACHE / package_name / "-" / tarball
-    upstream_url = f"{NPM_UPSTREAM}/{package_name}/-/{tarball}"
+    local_path = NPM_CACHE / Path(*package.split("/")) / "-" / tarball
 
     if not local_path.exists():
+        upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}/-/{quote(tarball)}"
         await utils.fetch_and_cache(upstream_url, local_path)
 
     try:
-        return await utils.conditional_file_response(request, local_path, "application/gzip")
+        return await utils.conditional_file_response(
+            request, local_path, "application/octet-stream", attachment=True
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=404)
+
+
+@router.post("/-/npm/v1/security/advisories/bulk")
+async def npm_security_bulk(request: Request):
+    """
+    Proxy npm audit bulk requests.
+    Save response to cache based on a hash of the POST body.
+    """
+    body_bytes = await request.body()
+    body_hash = str(abs(hash(body_bytes)))
+    local_path = NPM_CACHE / "security" / f"{body_hash}.json"
+
+    if local_path.exists():
+        try:
+            return await utils.conditional_file_response(request, local_path, "application/json")
+        except FileNotFoundError:
+            pass
+
+    upstream_url = f"{NPM_UPSTREAM}/-/npm/v1/security/advisories/bulk"
+    data = await utils.fetch_and_cache(upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes)
+    return data
