@@ -143,6 +143,48 @@ export CACHE_DIR=/path/to/cache
 
 ---
 
+## 🧪 Running Tests
+
+Tests are written using **pytest** and include coverage reporting.
+
+### 1. Install test dependencies
+
+```bash
+pip install -r test-requirements.txt
+```
+
+Your `test-requirements.txt` should include:
+
+```text
+-r requirements.txt
+pytest
+pytest-asyncio
+pytest-cov
+pytest-mock
+```
+
+### 2. Run all tests
+
+```bash
+PYTHONPATH=. pytest
+```
+
+### 3. Run tests with coverage summary
+
+```bash
+PYTHONPATH=. pytest --cov=app --cov-report=term-missing -v
+```
+
+### 4. Generate an HTML coverage report
+
+```bash
+PYTHONPATH=. pytest --cov=app --cov-report=html
+```
+
+Then open `htmlcov/index.html` in your browser to view detailed results.
+
+---
+
 ## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
