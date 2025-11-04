@@ -33,8 +33,9 @@ PYPI_CACHE = config.CACHE_DIR / "pypi"
 def rewrite_index_html(html: str, base_url: str) -> str:
     """Rewrite PyPI simple index links to route through proxy."""
     soup = BeautifulSoup(html, "html.parser")
+
     for a in soup.find_all("a", href=True):
-        orig = a["href"]
+        orig: str = str(a["href"])
         parsed = urlparse(orig)
         new_href = orig
 
@@ -56,9 +57,9 @@ def rewrite_index_html(html: str, base_url: str) -> str:
                 new_href = f"{base_url}/{rel}"
 
         if parsed.query:
-            new_href += "?" + parsed.query
+            new_href += f"?{parsed.query}"
         if parsed.fragment:
-            new_href += "#" + parsed.fragment
+            new_href += f"#{parsed.fragment}"
 
         a["href"] = new_href
 
@@ -82,7 +83,8 @@ async def pypi_root_index(request: Request):
 @router.get("/simple/{package}/")
 async def pypi_package_index(package: str, request: Request):
     try:
-        local_path = utils.safe_cache_path(PYPI_CACHE, "simple", package, "index.html")
+        local_path = utils.safe_cache_path(
+            PYPI_CACHE, "simple", package, "index.html")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -135,7 +137,8 @@ async def pypi_package_json(package: str, request: Request):
 @router.get("/{package}/{version}/json")
 async def pypi_package_version_json(package: str, version: str, request: Request):
     try:
-        local_path = utils.safe_cache_path(PYPI_CACHE, package, version, "index.json")
+        local_path = utils.safe_cache_path(
+            PYPI_CACHE, package, version, "index.json")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -20,7 +20,7 @@
 from typing import Iterable, Optional
 from fastapi import HTTPException, Request, Response
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from http import HTTPMethod
 import hashlib
 import json
@@ -77,25 +77,25 @@ def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
     """
     cache_root = cache_root.resolve()
 
-    segments = []
+    segments: list[str] = []
     for p in parts:
         if p is None:
             continue
 
         p_obj = Path(p)
 
-        # Explicitly reject absolute paths (POSIX or Windows)
+        # Reject absolute paths (POSIX or Windows)
         if p_obj.is_absolute():
             raise ValueError(f"Absolute path not allowed: {p}")
 
-        # Reject UNC or drive-letter paths manually
+        # Explicitly reject UNC or drive-letter style paths
         if isinstance(p, str):
             if p.startswith(("/", "\\")):
                 raise ValueError(f"Absolute path not allowed: {p}")
             if len(p) >= 2 and p[1] == ":":
                 raise ValueError(f"Drive letter path not allowed: {p}")
 
-        # Split safely — if ".." appears, reject it
+        # Reject traversal or invalid segments
         for seg in p_obj.parts:
             if seg in ("..", "/", "\\"):
                 raise ValueError(f"Path traversal not allowed: {p}")
@@ -106,10 +106,11 @@ def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
     try:
         candidate_abs = candidate.resolve(strict=False)
     except (FileNotFoundError, TypeError):
+        # Fallback: resolve the parent and rebuild
         parent_resolved = candidate.parent.resolve()
         candidate_abs = parent_resolved.joinpath(candidate.name)
 
-    # Ensure the candidate is inside cache_root
+    # Ensure candidate stays inside the cache root
     try:
         candidate_abs.relative_to(cache_root)
     except ValueError:
@@ -120,6 +121,8 @@ def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
 # ----------------------------------------------------------------------
 # Network fetch + local caching (atomic, safe)
 # ----------------------------------------------------------------------
+
+
 async def fetch_and_cache(
     url: str,
     dest: Path,
@@ -140,8 +143,10 @@ async def fetch_and_cache(
         dest_abs = dest.resolve(strict=False)
         dest_abs.relative_to(cache_root)
     except Exception:
-        logger.warning("Refused fetch_and_cache for dest outside cache: %s", dest)
-        raise HTTPException(status_code=400, detail="Invalid cache destination")
+        logger.warning(
+            "Refused fetch_and_cache for dest outside cache: %s", dest)
+        raise HTTPException(
+            status_code=400, detail="Invalid cache destination")
 
     if dest.exists():
         if return_json:
@@ -215,7 +220,7 @@ def make_etag_and_last_modified(path: Path):
     etag = hashlib.sha256(
         f"{path.name}-{stat.st_mtime}-{stat.st_size}".encode("utf-8")
     ).hexdigest()
-    last_modified = datetime.utcfromtimestamp(stat.st_mtime).strftime(
+    last_modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).strftime(
         "%a, %d %b %Y %H:%M:%S GMT"
     )
     return etag, last_modified
