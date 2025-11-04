@@ -27,14 +27,13 @@ def test_rewrite_index_html_relative_and_absolute():
 
 
 # -----------------------
-# Tests for endpoints
+# Endpoint tests
 # -----------------------
 
 @pytest.mark.asyncio
 @patch("app.routes.pypi_routes.utils.conditional_file_response", new_callable=AsyncMock)
 @patch("app.routes.pypi_routes.httpx.AsyncClient.get", new_callable=AsyncMock)
 async def test_pypi_root_index_fetch(mock_get, mock_response):
-    # Simulate file does not exist
     with patch.object(Path, "exists", return_value=False):
         mock_get.return_value.status_code = 200
         mock_get.return_value.text = "<html>root index</html>"
@@ -111,3 +110,31 @@ async def test_pypi_package_version_json_fetch(mock_fetch, mock_response):
         response = await pypi_routes.pypi_package_version_json(package, version, request_mock)
         mock_fetch.assert_called_once()
         mock_response.assert_called_once()
+
+
+# -----------------------
+# Security tests (path traversal)
+# -----------------------
+
+@pytest.mark.asyncio
+async def test_pypi_package_index_rejects_absolute_path():
+    request_mock = AsyncMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await pypi_routes.pypi_package_index("/etc/passwd", request_mock)
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_pypi_artifact_rejects_traversal():
+    request_mock = AsyncMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await pypi_routes.pypi_artifact("../secret/file.whl", request_mock)
+    assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_pypi_package_json_rejects_traversal():
+    request_mock = AsyncMock()
+    with pytest.raises(HTTPException) as exc_info:
+        await pypi_routes.pypi_package_json("../../package", request_mock)
+    assert exc_info.value.status_code == 400

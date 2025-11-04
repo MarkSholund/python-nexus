@@ -18,11 +18,11 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 from fastapi import APIRouter, HTTPException, Request
-from pathlib import Path
-from app.config import config
-from app.utils import utils
 from urllib.parse import quote
 from http import HTTPMethod
+
+from app.config import config
+from app.utils import utils
 
 NPM_UPSTREAM = "https://registry.npmjs.org"
 NPM_CACHE = config.CACHE_DIR / "npm"
@@ -57,14 +57,19 @@ async def npm_package_metadata(package: str, request: Request):
     Example: GET /npm/lodash or /npm/@types/react
     Only cache metadata; do NOT prefetch tgz files.
     """
-    local_path = NPM_CACHE / Path(*package.split("/")) / "index.json"
+    try:
+        local_path = utils.safe_cache_path(NPM_CACHE, package, "index.json")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
 
     if not local_path.exists():
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}"
         await utils.fetch_and_cache(upstream_url, local_path)
 
     try:
-        return await utils.conditional_file_response(request, local_path, "application/json")
+        return await utils.conditional_file_response(
+            request, local_path, "application/json"
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=404)
 
@@ -76,7 +81,10 @@ async def npm_package_tarball(package: str, tarball: str, request: Request):
     Example: GET /npm/lodash/-/lodash-4.17.21.tgz
              GET /npm/@types/react/-/react-18.2.21.tgz
     """
-    local_path = NPM_CACHE / Path(*package.split("/")) / "-" / tarball
+    try:
+        local_path = utils.safe_cache_path(NPM_CACHE, package, "-", tarball)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
 
     if not local_path.exists():
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}/-/{quote(tarball)}"
@@ -98,14 +106,23 @@ async def npm_security_bulk(request: Request):
     """
     body_bytes = await request.body()
     body_hash = str(abs(hash(body_bytes)))
-    local_path = NPM_CACHE / "security" / f"{body_hash}.json"
+
+    try:
+        local_path = utils.safe_cache_path(
+            NPM_CACHE, "security", f"{body_hash}.json")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
 
     if local_path.exists():
         try:
-            return await utils.conditional_file_response(request, local_path, "application/json")
+            return await utils.conditional_file_response(
+                request, local_path, "application/json"
+            )
         except FileNotFoundError:
             pass
 
     upstream_url = f"{NPM_UPSTREAM}/-/npm/v1/security/advisories/bulk"
-    data = await utils.fetch_and_cache(upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes)
+    data = await utils.fetch_and_cache(
+        upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes
+    )
     return data

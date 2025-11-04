@@ -1,13 +1,59 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Copyright (C) 2025 Mark Sholund
+#
+# This file is part of the FastAPI Nexus Proxy project.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+
 import pytest
-from unittest.mock import AsyncMock, patch, mock_open
-from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+# from pathlib import Path
 import json
-from datetime import datetime
-from fastapi import Request
+# import os
+# from datetime import datetime
 from fastapi.responses import Response
 from app.utils import utils
-from http import HTTPStatus
 from app.utils.utils import HTTPMethod
+
+
+@pytest.fixture(autouse=True)
+def patch_cache_dir(tmp_path, monkeypatch):
+    """Force config.CACHE_DIR to a safe temp directory for all tests."""
+    monkeypatch.setattr(utils.config, "CACHE_DIR", tmp_path)
+    yield
+
+
+# ------------------------
+# safe_cache_path
+# ------------------------
+
+def test_safe_cache_path_allows_nested(monkeypatch, tmp_path):
+    path = utils.safe_cache_path(tmp_path, "nested", "dir", "file.txt")
+    assert path == tmp_path / "nested" / "dir" / "file.txt"
+
+
+def test_safe_cache_path_rejects_traversal(tmp_path):
+    with pytest.raises(ValueError):
+        utils.safe_cache_path(tmp_path, "../evil.txt")
+
+
+def test_safe_cache_path_rejects_absolute(tmp_path):
+    with pytest.raises(ValueError):
+        utils.safe_cache_path(tmp_path, "/etc/passwd")
+
 
 # ------------------------
 # open_cached_file
@@ -23,6 +69,7 @@ def test_open_cached_file(tmp_path):
     with pytest.raises(FileNotFoundError):
         utils.open_cached_file(missing_file)
 
+
 # ------------------------
 # make_etag_and_last_modified
 # ------------------------
@@ -35,6 +82,7 @@ def test_make_etag_and_last_modified(tmp_path):
     assert isinstance(last_modified, str)
     assert len(etag) == 64  # sha256 hash length
 
+
 # ------------------------
 # file_headers
 # ------------------------
@@ -46,6 +94,7 @@ def test_file_headers(tmp_path):
     assert "ETag" in headers
     assert "Last-Modified" in headers
 
+
 # ------------------------
 # conditional_file_response
 # ------------------------
@@ -55,7 +104,7 @@ async def test_conditional_file_response_returns_content(tmp_path):
     file_path = tmp_path / "file.txt"
     file_path.write_text("abc")
 
-    request = AsyncMock()
+    request = MagicMock()
     request.headers = {}
 
     response = await utils.conditional_file_response(request, file_path, "text/plain")
@@ -63,6 +112,8 @@ async def test_conditional_file_response_returns_content(tmp_path):
     assert response.status_code == 200
     assert response.body == b"abc"
     assert "ETag" in response.headers
+    assert "Last-Modified" in response.headers
+
 
 @pytest.mark.asyncio
 async def test_conditional_file_response_304(tmp_path):
@@ -71,9 +122,8 @@ async def test_conditional_file_response_304(tmp_path):
 
     etag, last_modified = utils.make_etag_and_last_modified(file_path)
 
-    request = AsyncMock()
+    request = MagicMock()
     request.headers = {"If-None-Match": etag}
-
     response = await utils.conditional_file_response(request, file_path, "text/plain")
     assert response.status_code == 304
 
@@ -81,56 +131,108 @@ async def test_conditional_file_response_304(tmp_path):
     response = await utils.conditional_file_response(request, file_path, "text/plain")
     assert response.status_code == 304
 
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_rejects_outside_cache(tmp_path):
+    file_path = tmp_path.parent / "outside.txt"
+    file_path.write_text("abc")
+    request = MagicMock()
+    request.headers = {}
+    with pytest.raises(FileNotFoundError):
+        await utils.conditional_file_response(request, file_path, "text/plain")
+
+
 # ------------------------
 # fetch_and_cache
 # ------------------------
 
 @pytest.mark.asyncio
-@patch("app.utils.utils.httpx.AsyncClient.get", new_callable=AsyncMock)
-async def test_fetch_and_cache_get_bytes(mock_get, tmp_path):
+async def test_fetch_and_cache_get_bytes(monkeypatch, tmp_path):
+    """Simulate GET fetch with byte content"""
     url = "http://example.com/data.txt"
     dest = tmp_path / "data.txt"
 
-    mock_get.return_value.status_code = 200
-    mock_get.return_value.content = b"abc"
-    mock_get.return_value.text = "abc"
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"abc"
+    mock_resp.text = "abc"
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.get.return_value = mock_resp
+    monkeypatch.setattr(utils.httpx, "AsyncClient", lambda **_: mock_client)
 
     result = await utils.fetch_and_cache(url, dest)
     assert dest.exists()
     assert dest.read_bytes() == b"abc"
     assert result == dest
 
+
 @pytest.mark.asyncio
-@patch("app.utils.utils.httpx.AsyncClient.post", new_callable=AsyncMock)
-async def test_fetch_and_cache_post_json(mock_post, tmp_path):
+async def test_fetch_and_cache_post_json(monkeypatch, tmp_path):
+    """Simulate POST fetch returning JSON"""
     url = "http://example.com/api"
     dest = tmp_path / "resp.json"
     data = b'{"query":1}'
 
-    mock_post.return_value.status_code = 200
-    mock_post.return_value.text = '{"ok":true}'
-    mock_post.return_value.content = b'{"ok":true}'
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = '{"ok":true}'
+    mock_resp.content = b'{"ok":true}'
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.post.return_value = mock_resp
+    monkeypatch.setattr(utils.httpx, "AsyncClient", lambda **_: mock_client)
 
-    result = await utils.fetch_and_cache(url, dest, method=HTTPMethod.POST, data=data, return_json=True)
+    result = await utils.fetch_and_cache(
+        url, dest, method=HTTPMethod.POST, data=data, return_json=True
+    )
     assert dest.exists()
     with open(dest) as f:
         saved = json.load(f)
     assert saved == {"ok": True}
     assert result == {"ok": True}
 
+
 @pytest.mark.asyncio
-@patch("app.utils.utils.httpx.AsyncClient.get", new_callable=AsyncMock)
-async def test_fetch_and_cache_raises_http_exception(mock_get, tmp_path):
+async def test_fetch_and_cache_raises_http_exception(monkeypatch, tmp_path):
+    """Simulate upstream 404"""
     url = "http://example.com/missing"
     dest = tmp_path / "missing.txt"
 
-    class ResponseMock:
-        status_code = 404
-        def raise_for_status(self):
-            raise utils.httpx.HTTPStatusError("Not Found", request=None, response=self)
-
-    mock_get.return_value = ResponseMock()
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.raise_for_status.side_effect = utils.httpx.HTTPStatusError(
+        "Not Found", request=None, response=mock_resp
+    )
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.get.return_value = mock_resp
+    monkeypatch.setattr(utils.httpx, "AsyncClient", lambda **_: mock_client)
 
     with pytest.raises(utils.HTTPException) as exc:
         await utils.fetch_and_cache(url, dest)
     assert exc.value.status_code == 404
+
+
+# ------------------------
+# Additional safety checks
+# ------------------------
+
+@pytest.mark.asyncio
+async def test_fetch_and_cache_refuses_outside_cache(monkeypatch, tmp_path):
+    """Destination outside cache should raise HTTPException(400)."""
+    outside = tmp_path.parent / "escape.txt"
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    monkeypatch.setattr(utils.httpx, "AsyncClient", lambda **_: mock_client)
+
+    with pytest.raises(utils.HTTPException) as exc:
+        await utils.fetch_and_cache("http://example.com", outside)
+    assert exc.value.status_code == 400
+
+
+def test_safe_cache_path_preserves_relative(tmp_path):
+    p = utils.safe_cache_path(tmp_path, "a/b/c.txt")
+    assert str(tmp_path) in str(p)

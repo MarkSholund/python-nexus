@@ -17,8 +17,9 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-from app.config import config
+from urllib.parse import quote
 from fastapi import APIRouter, HTTPException, Request
+from app.config import config
 from app.utils import utils
 
 MAVEN_UPSTREAM = "https://repo1.maven.org/maven2"
@@ -26,18 +27,29 @@ MAVEN_CACHE = config.CACHE_DIR / "maven"
 
 router = APIRouter(prefix="/maven2", tags=["Maven"])
 
-# -------------------
-# Maven Routes
-# -------------------
-
 
 @router.get("/{path:path}")
 async def maven_proxy(path: str, request: Request):
-    local_path = MAVEN_CACHE / path
-    if not local_path.exists():
-        await utils.fetch_and_cache(f"{MAVEN_UPSTREAM}/{path}", local_path)
-
+    """
+    Proxy Maven repository files, caching them under MAVEN_CACHE.
+    Uses utils.safe_cache_path to prevent path traversal, and utils.fetch_and_cache
+    which performs atomic writes and additional containment checks.
+    """
+    # Build a safe local cache path (rejects absolute paths / traversal)
     try:
-        return await utils.conditional_file_response(request, local_path, "application/octet-stream")
+        local_path = utils.safe_cache_path(MAVEN_CACHE, path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    # Fetch into cache if missing (fetch_and_cache will re-check containment)
+    if not local_path.exists():
+        upstream_url = f"{MAVEN_UPSTREAM}/{quote(path, safe='/')}"
+        await utils.fetch_and_cache(upstream_url, local_path)
+
+    # Serve the file (conditional_file_response re-validates containment before serving)
+    try:
+        return await utils.conditional_file_response(
+            request, local_path, "application/octet-stream"
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=404)

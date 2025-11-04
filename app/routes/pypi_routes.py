@@ -35,8 +35,8 @@ def rewrite_index_html(html: str, base_url: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a", href=True):
         orig = a["href"]
-        parsed = urlparse(orig)  # type: ignore
-        new_href = orig  # default: unchanged
+        parsed = urlparse(orig)
+        new_href = orig
 
         if parsed.scheme in ("http", "https"):
             host = parsed.netloc.lower()
@@ -48,14 +48,13 @@ def rewrite_index_html(html: str, base_url: str) -> str:
                 new_href = f"{base_url}/{path}" if path else f"{base_url}/"
         else:
             # relative URL
-            rel = orig.lstrip("/")  # type: ignore
+            rel = orig.lstrip("/")
             if rel.startswith("packages/"):
                 suffix = rel[len("packages/"):]
                 new_href = f"{base_url}/packages/{suffix}"
             elif rel.startswith("pypi/"):
                 new_href = f"{base_url}/{rel}"
 
-        # preserve query and fragment
         if parsed.query:
             new_href += "?" + parsed.query
         if parsed.fragment:
@@ -68,7 +67,7 @@ def rewrite_index_html(html: str, base_url: str) -> str:
 
 @router.get("/simple/")
 async def pypi_root_index(request: Request):
-    local_path = PYPI_CACHE / "simple" / "index.html"
+    local_path = utils.safe_cache_path(PYPI_CACHE, "simple", "index.html")
     if not local_path.exists():
         async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             r = await client.get(f"{PYPI_UPSTREAM}/simple/")
@@ -82,7 +81,10 @@ async def pypi_root_index(request: Request):
 
 @router.get("/simple/{package}/")
 async def pypi_package_index(package: str, request: Request):
-    local_path = PYPI_CACHE / "simple" / package / "index.html"
+    try:
+        local_path = utils.safe_cache_path(PYPI_CACHE, "simple", package, "index.html")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not local_path.exists():
         url = f"{PYPI_UPSTREAM}/simple/{package}/"
@@ -99,7 +101,11 @@ async def pypi_package_index(package: str, request: Request):
 
 @router.get("/packages/{path:path}")
 async def pypi_artifact(path: str, request: Request):
-    local_path = PYPI_CACHE / "packages" / path
+    try:
+        local_path = utils.safe_cache_path(PYPI_CACHE, "packages", path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     if not local_path.exists():
         upstream_path = path
         if upstream_path.startswith("packages/"):
@@ -115,7 +121,11 @@ async def pypi_artifact(path: str, request: Request):
 
 @router.get("/{package}/json")
 async def pypi_package_json(package: str, request: Request):
-    local_path = PYPI_CACHE / package / "index.json"
+    try:
+        local_path = utils.safe_cache_path(PYPI_CACHE, package, "index.json")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     if not local_path.exists():
         await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/json", local_path)
 
@@ -124,7 +134,11 @@ async def pypi_package_json(package: str, request: Request):
 
 @router.get("/{package}/{version}/json")
 async def pypi_package_version_json(package: str, version: str, request: Request):
-    local_path = PYPI_CACHE / package / version / "index.json"
+    try:
+        local_path = utils.safe_cache_path(PYPI_CACHE, package, version, "index.json")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     if not local_path.exists():
         await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json", local_path)
 
