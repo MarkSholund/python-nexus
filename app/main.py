@@ -19,7 +19,7 @@
 
 from fastapi import FastAPI
 from app.routes import pypi_routes, maven_routes, npm_routes
-from app.config import config
+import app.config as config
 import logging
 from contextlib import asynccontextmanager
 

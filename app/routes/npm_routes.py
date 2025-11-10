@@ -17,22 +17,25 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
+
 from fastapi import APIRouter, HTTPException, Request
 from urllib.parse import quote
 from http import HTTPMethod
 
-from app.config import config
-from app.utils import utils
+import app.config as config
+import app.utils as utils
+from app.validators import (
+    validate_npm_package_name,
+    validate_tarball_name,
+    safe_join_path,
+    ValidationError
+)
 
 NPM_UPSTREAM = "https://registry.npmjs.org"
 NPM_CACHE = config.CACHE_DIR / "npm"
 
 router = APIRouter(prefix="/npm", tags=["npm"])
 
-
-# -------------------
-# Helpers
-# -------------------
 
 def encode_scoped_package(pkg: str) -> str:
     """
@@ -46,10 +49,6 @@ def encode_scoped_package(pkg: str) -> str:
     return quote(pkg)
 
 
-# -------------------
-# NPM Routes
-# -------------------
-
 @router.get("/{package:path}")
 async def npm_package_metadata(package: str, request: Request):
     """
@@ -57,10 +56,18 @@ async def npm_package_metadata(package: str, request: Request):
     Example: GET /npm/lodash or /npm/@types/react
     Only cache metadata; do NOT prefetch tgz files.
     """
+    # SECURITY: Validate package name format
+    if not validate_npm_package_name(package):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid NPM package name: {package}"
+        )
+
     try:
-        local_path = utils.safe_cache_path(NPM_CACHE, package, "index.json")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
+        # Use safe path joining with validation
+        local_path = safe_join_path(NPM_CACHE, package, "index.json")
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not local_path.exists():
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}"
@@ -71,7 +78,7 @@ async def npm_package_metadata(package: str, request: Request):
             request, local_path, "application/json"
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="Package not found")
 
 
 @router.get("/{package:path}/-/{tarball}")
@@ -79,12 +86,27 @@ async def npm_package_tarball(package: str, tarball: str, request: Request):
     """
     Serve tarball files on-demand.
     Example: GET /npm/lodash/-/lodash-4.17.21.tgz
-             GET /npm/@types/react/-/react-18.2.21.tgz
+    GET /npm/@types/react/-/react-18.2.21.tgz
     """
+    # SECURITY: Validate package name
+    if not validate_npm_package_name(package):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid NPM package name: {package}"
+        )
+
+    # SECURITY: Validate tarball filename
+    if not validate_tarball_name(tarball):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tarball filename: {tarball}"
+        )
+
     try:
-        local_path = utils.safe_cache_path(NPM_CACHE, package, "-", tarball)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
+        # Use safe path joining
+        local_path = safe_join_path(NPM_CACHE, package, "-", tarball)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not local_path.exists():
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}/-/{quote(tarball)}"
@@ -95,7 +117,7 @@ async def npm_package_tarball(package: str, tarball: str, request: Request):
             request, local_path, "application/octet-stream", attachment=True
         )
     except FileNotFoundError:
-        raise HTTPException(status_code=404)
+        raise HTTPException(status_code=404, detail="Tarball not found")
 
 
 @router.post("/-/npm/v1/security/advisories/bulk")
@@ -104,14 +126,17 @@ async def npm_security_bulk(request: Request):
     Proxy npm audit bulk requests.
     Save response to cache based on a hash of the POST body.
     """
+    import hashlib
+
     body_bytes = await request.body()
-    body_hash = str(abs(hash(body_bytes)))
+
+    # SECURITY: Use cryptographic hash instead of Python's hash()
+    body_hash = hashlib.sha256(body_bytes).hexdigest()[:16]
 
     try:
-        local_path = utils.safe_cache_path(
-            NPM_CACHE, "security", f"{body_hash}.json")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid path")
+        local_path = safe_join_path(NPM_CACHE, "security", f"{body_hash}.json")
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if local_path.exists():
         try:

@@ -29,8 +29,9 @@ import httpx
 import aiofiles
 import os
 import tempfile
+import time
 
-from app.config import config
+import app.config as config
 
 logger = logging.getLogger("uvicorn")
 
@@ -38,37 +39,6 @@ logger = logging.getLogger("uvicorn")
 # ----------------------------------------------------------------------
 # Path safety utilities
 # ----------------------------------------------------------------------
-# def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
-#     """
-#     Build a safe path within cache_root from user-supplied components.
-#     Allows nested components but prevents directory traversal or absolute path injection.
-#     Raises ValueError if the resolved candidate is not inside cache_root.
-#     """
-#     cache_root = cache_root.resolve()
-#     segments = []
-#     for p in parts:
-#         if p is None:
-#             continue
-#         # Split path into segments; strip absolute/drive prefixes.
-#         segments.extend([seg for seg in Path(p).parts if seg not in ("/", "\\")])
-#     candidate = cache_root.joinpath(*segments)
-
-#     try:
-#         candidate_abs = candidate.resolve(strict=False)
-#     except TypeError:
-#         try:
-#             candidate_abs = candidate.resolve()
-#         except FileNotFoundError:
-#             parent_resolved = candidate.parent.resolve()
-#             candidate_abs = parent_resolved.joinpath(candidate.name)
-
-#     try:
-#         candidate_abs.relative_to(cache_root)
-#     except Exception:
-#         raise ValueError(f"Refused unsafe path outside cache: {candidate_abs!s}")
-
-#     return candidate_abs
-
 def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
     """
     Build a safe path within cache_root from user-supplied components.
@@ -130,9 +100,19 @@ async def fetch_and_cache(
     data: bytes | None = None,
     return_json: bool = False,
     timeout: float = 60.0,
+    force_refresh: bool = False,
 ):
     """
     Fetch from upstream (GET or POST), save to local cache atomically, optionally return JSON.
+
+    Args:
+        url: Upstream URL to fetch
+        dest: Destination path in cache
+        method: HTTP method (GET or POST)
+        data: Request body for POST requests
+        return_json: If True, parse and return JSON content
+        timeout: Request timeout in seconds
+        force_refresh: If True, fetch even if file exists (for cache refresh)
 
     Security notes:
     - Rejects destinations not under config.CACHE_DIR.
@@ -148,15 +128,18 @@ async def fetch_and_cache(
         raise HTTPException(
             status_code=400, detail="Invalid cache destination")
 
-    if dest.exists():
+    # Return existing cache if not forcing refresh
+    if dest.exists() and not force_refresh:
         if return_json:
             async with aiofiles.open(dest, "r", encoding="utf-8") as f:
                 content = await f.read()
             return json.loads(content)
         return dest
 
+    # Create parent directories if needed
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    # Fetch from upstream
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         try:
             if method == HTTPMethod.POST:
@@ -171,6 +154,7 @@ async def fetch_and_cache(
             ) from e
 
     # Atomic write: temp file in same directory, then replace.
+    tmpname = None
     try:
         if return_json:
             text = resp.text
@@ -196,7 +180,7 @@ async def fetch_and_cache(
             return dest
     finally:
         try:
-            if "tmpname" in locals() and os.path.exists(tmpname):
+            if tmpname and os.path.exists(tmpname):
                 os.unlink(tmpname)
         except Exception:
             pass
@@ -280,3 +264,25 @@ async def conditional_file_response(
 
     content = open_cached_file(resolved)
     return Response(content=content, headers=headers, media_type=media_type)
+
+
+def is_cache_stale(path: Path, max_age_hours: int = 24) -> bool:
+    """
+    Check if cached file is stale and needs refreshing.
+    
+    Args:
+        path: Path to cached file
+        max_age_hours: Maximum age in hours before considering stale
+        
+    Returns:
+        True if file doesn't exist or is older than max_age_hours
+    """
+    try:
+        if not path.exists():
+            return True
+        file_age_seconds = time.time() - path.stat().st_mtime
+        max_age_seconds = max_age_hours * 3600
+        return file_age_seconds > max_age_seconds
+    except (OSError, FileNotFoundError):
+        # If we can't stat the file (e.g., parent dir doesn't exist), consider it stale
+        return True

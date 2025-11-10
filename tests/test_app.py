@@ -3,7 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, AsyncMock
 from app import main
-from app.config import config
+import app.config as config
 
 client = TestClient(main.app)
 

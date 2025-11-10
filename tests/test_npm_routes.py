@@ -38,7 +38,8 @@ async def test_npm_package_metadata_cached(mock_fetch, mock_response):
     test_package = "lodash"
 
     # File exists -> fetch_and_cache should NOT be called
-    with patch.object(Path, "exists", return_value=True):
+    with patch.object(Path, "exists", return_value=True
+    ):
         mock_response.return_value = {"name": "lodash"}
         response = await npm_routes.npm_package_metadata(test_package, request=AsyncMock())
         mock_fetch.assert_not_called()

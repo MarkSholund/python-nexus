@@ -25,8 +25,8 @@ import json
 # import os
 # from datetime import datetime
 from fastapi.responses import Response
-from app.utils import utils
-from app.utils.utils import HTTPMethod
+import app.utils as utils
+from http import HTTPMethod
 
 
 @pytest.fixture(autouse=True)
