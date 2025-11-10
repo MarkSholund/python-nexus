@@ -1,4 +1,4 @@
-# FastAPI Nexus Proxy
+# PyNexus
 
 A simple **FastAPI-based proxy server** for caching and serving Maven and PyPI artifacts locally. This service acts as a local cache for upstream repositories, reducing external requests and improving artifact availability.
 
