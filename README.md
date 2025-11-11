@@ -71,9 +71,10 @@ PYPI_UPSTREAM = "https://pypi.org"
 
 ```python
 from pathlib import Path
-CACHE_DIR = Path("cache")  # or use environment variable
+CACHE_DIR = Path(os.environ.get("NEXUS_CACHE_DIR", "cache"))
 MAVEN_CACHE = CACHE_DIR / "maven"
 PYPI_CACHE = CACHE_DIR / "pypi"
+NPM_CACHE = config.CACHE_DIR / "npm"
 ```
 
 Ensure these directories exist and are writable by the application.
@@ -104,6 +105,7 @@ GET /pypi/simple/{package}/          # Package index HTML
 GET /pypi/{package}/json             # Package JSON metadata
 GET /pypi/{package}/{version}/json   # Version-specific JSON
 GET /pypi/packages/{path}            # Package files (wheel, tar, zip, etc.)
+```
 
 - **NPM proxy**
 
@@ -112,62 +114,103 @@ GET /npm/{package}                   # Package metadata JSON (cached)
 GET /npm/{package}/-/{tarball}       # Package tarball (fetched on-demand)
 POST /npm/-/npm/v1/security/advisories/bulk  # Proxies npm audit bulk requests (cached by body hash)
 ```
-```
 
 ---
 
 ## Caching Behavior
 
-- Files are served from the local cache if they exist.
-- If a file is missing, it is downloaded, cached, and served.
-- Supports **ETag** and **Last-Modified** headers for conditional GET requests.
+### Cache Expiration (TTL)
+
+- **Metadata files** (indexes, JSON manifests) are automatically refreshed if older than configured TTL (default: 24 hours)
+  - PyPI: `/simple/` indexes and `/pypi/{package}/json` endpoints
+  - NPM: `/npm/{package}` metadata and security advisories
+  - Maven: `.xml`, `.pom`, `.sha1`, `.md5` files
+  
+  Override with `PYPI_METADATA_TTL_HOURS`, `NPM_METADATA_TTL_HOURS`, `MAVEN_METADATA_TTL_HOURS` environment variables.
+
+- **Artifact files** (JARs, wheels, tarballs, packages) are cached indefinitely once downloaded
+  - No automatic refresh; delete from cache manually to re-download
+
+- Set TTL to `0` to disable automatic cache updates and treat all cached files as immutable.
+
+### Response Behavior
+
+- Files are served from the local cache if they exist and are fresh (within TTL).
+- Missing or stale files are fetched from upstream, cached, and served.
+- Supports **ETag** and **Last-Modified** headers for conditional GET requests (returns 304 Not Modified when appropriate).
 - Upstream errors return proper HTTP status codes:
   - `404` for not found
   - `502` or upstream status code for other errors
+- Network timeouts and transient errors automatically retry up to `MAX_RETRIES` times (default: 3).
 
-- NPM-specific caching notes:
-  - The server caches package metadata JSON under `cache/npm/{package}/index.json`.
-  - Tarballs are not prefetched: requests to `/npm/{package}/-/{tarball}` fetch the tarball from the upstream registry and save it under `cache/npm/...`.
+### Registry-Specific Notes
 
----
-
-## Logging
-
-- The app uses standard Python `logging`.
-- You can configure the logging format using:
-
-```python
-import logging
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelprefix)s %(asctime)s | %(message)s",
-)
-```
-
-- The logs will show cache hits, upstream fetches, and errors.
+- **NPM**: Package metadata and security advisories are cached by package name/content hash; tarballs are fetched on-demand.
+- **PyPI**: Simple indexes are HTML with rewritten links to route through the proxy.
+- **Maven**: Metadata and artifacts are distinguished by file extension; only metadata is refreshed.
 
 ---
 
 ## Environment Variables
 
-- You can override cache directory with:
+### Cache and Storage
+
+- `NEXUS_CACHE_DIR` — Override local cache directory (default: `cache`)
 
 ```bash
 export NEXUS_CACHE_DIR=/path/to/cache
 ```
 
-- Default is `cache`.
+### Network and Timeout Configuration
 
-Notes on cache ownership and symlink safety
+- `REQUEST_TIMEOUT_SECONDS` — HTTP request timeout in seconds (default: `30`)
+  - Controls timeout for all upstream HTTP requests to Maven, PyPI, and NPM registries
 
-- The server enforces strict path containment for all cache operations. Key helpers are in `app/utils/utils.py`:
-  - `safe_cache_path` validates and builds cache paths from user input.
-  - `fetch_and_cache` verifies destinations are under the configured cache root and writes atomically (temp file + `os.replace`).
-  - `conditional_file_response` re-resolves files before serving and supports conditional GETs (ETag / Last-Modified).
+```bash
+export REQUEST_TIMEOUT_SECONDS=60
+```
 
-- For safety, run the service with a `NEXUS_CACHE_DIR` owned by the same user as the process and not writable by untrusted local users. This reduces symlink or replacement race risks.
+- `MAX_RETRIES` — Number of retries for transient failures (default: `3`)
+  - Automatic retries on network timeouts and transient errors
 
+```bash
+export MAX_RETRIES=5
+```
+
+### Cache TTL Configuration
+
+Metadata files (package indexes, JSON manifests) are automatically refreshed if older than the configured TTL. Artifact files (JARs, wheels, tarballs) are cached indefinitely once downloaded.
+
+- `PYPI_METADATA_TTL_HOURS` — PyPI metadata cache TTL (default: `24`)
+  - Applies to `/pypi/simple/` indexes and `/pypi/{package}/json` endpoints
+
+```bash
+export PYPI_METADATA_TTL_HOURS=12
+```
+
+- `NPM_METADATA_TTL_HOURS` — NPM metadata cache TTL (default: `24`)
+  - Applies to `/npm/{package}` metadata and security advisories
+
+```bash
+export NPM_METADATA_TTL_HOURS=24
+```
+
+- `MAVEN_METADATA_TTL_HOURS` — Maven metadata cache TTL (default: `24`)
+  - Applies to `.xml`, `.pom`, `.sha1`, `.md5` files
+
+```bash
+export MAVEN_METADATA_TTL_HOURS=48
+```
+
+Set TTL to `0` to disable automatic cache refresh (treat cached metadata as immutable).
+
+### Upstream Registry Overrides (Optional)
+
+- `NPM_REGISTRY` — Override NPM registry URL (default: `https://registry.npmjs.org`)
+- `PYPI_REGISTRY` — Override PyPI registry URL (default: `https://pypi.org`)
+- `MAVEN_CENTRAL` — Override Maven Central URL (default: `https://repo1.maven.org/maven2`)
+
+---
 
 ---
 
@@ -213,6 +256,19 @@ Then open `htmlcov/index.html` in your browser to view detailed results.
 
 ---
 
+## Security Notes
+
+### Cache Ownership and Safety
+
+- The server enforces strict path containment for all cache operations. Key helpers are in `app/utils.py`:
+  - `safe_cache_path` validates and builds cache paths from user input.
+  - `fetch_and_cache` verifies destinations are under the configured cache root, writes atomically (temp file + `os.replace`), and retries on transient failures.
+  - `conditional_file_response` re-resolves files before serving and supports conditional GETs (ETag / Last-Modified).
+
+- For safety, run the service with a `NEXUS_CACHE_DIR` owned by the same user as the process and not writable by untrusted local users. This reduces symlink or replacement race risks.
+
+---
+
 ## License
 
 This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
@@ -247,7 +303,7 @@ This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**
 
 - Recommended for internal artifact caching and proxying.
 - Ensure cache directories have sufficient disk space for artifacts.
-- Timeout for upstream requests:
-  - Maven: 60 seconds
-  - PyPI package files: 120 seconds
+- Request timeouts are configurable via `REQUEST_TIMEOUT_SECONDS` environment variable (default: 30 seconds).
+- Transient failures automatically retry up to `MAX_RETRIES` times (default: 3).
 - Supports conditional GETs to reduce unnecessary bandwidth.
+- The app uses standard Python `logging` for cache hits, upstream fetches, and errors.
