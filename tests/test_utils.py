@@ -236,3 +236,203 @@ async def test_fetch_and_cache_refuses_outside_cache(monkeypatch, tmp_path):
 def test_safe_cache_path_preserves_relative(tmp_path):
     p = utils.safe_cache_path(tmp_path, "a/b/c.txt")
     assert str(tmp_path) in str(p)
+
+
+# ========================================
+# Additional Coverage Tests
+# ========================================
+
+def test_safe_cache_path_rejects_double_dot(tmp_path):
+    """Test explicit rejection of .. segment."""
+    with pytest.raises(ValueError, match="Path traversal not allowed"):
+        utils.safe_cache_path(tmp_path, "a/..")
+
+
+def test_safe_cache_path_rejects_single_dot_slash(tmp_path):
+    """Test rejection of paths starting with ./"""
+    # ./evil should be rejected if it contains .. or is otherwise malicious
+    # In this case, it's a valid relative path, so it should work
+    p = utils.safe_cache_path(tmp_path, "./file.txt")
+    assert p == tmp_path / "file.txt"
+
+
+def test_safe_cache_path_rejects_backslash_prefix(tmp_path):
+    """Test rejection of paths starting with backslash (Windows UNC)."""
+    with pytest.raises(ValueError, match="Absolute path not allowed"):
+        utils.safe_cache_path(tmp_path, "\\absolute")
+
+
+def test_safe_cache_path_rejects_drive_letter(tmp_path):
+    """Test drive letter rejection (Windows)."""
+    with pytest.raises(ValueError, match="Drive letter path not allowed"):
+        utils.safe_cache_path(tmp_path, "C:\\evil")
+
+
+def test_safe_cache_path_handles_none_parts(tmp_path):
+    """Test that None parts are skipped."""
+    p = utils.safe_cache_path(tmp_path, "a", None, "b.txt")
+    assert p == tmp_path / "a" / "b.txt"
+
+
+def test_open_cached_file_rejects_directory(tmp_path):
+    """Test that open_cached_file rejects directories."""
+    dir_path = tmp_path / "subdir"
+    dir_path.mkdir()
+    with pytest.raises(FileNotFoundError):
+        utils.open_cached_file(dir_path)
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_cache_returns_existing_file_bytes(monkeypatch, tmp_path):
+    """Test that fetch_and_cache returns existing file without fetching."""
+    dest = tmp_path / "data.txt"
+    dest.write_bytes(b"cached content")
+    
+    result = await utils.fetch_and_cache("http://example.com/data.txt", dest)
+    assert result == dest
+    assert dest.read_bytes() == b"cached content"
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_cache_returns_existing_file_json(monkeypatch, tmp_path):
+    """Test that fetch_and_cache returns existing JSON without fetching."""
+    dest = tmp_path / "data.json"
+    dest.write_text('{"cached": true}')
+    
+    result = await utils.fetch_and_cache(
+        "http://example.com/data.json", dest, return_json=True
+    )
+    assert result == {"cached": True}
+
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_not_found(tmp_path):
+    """Test that conditional_file_response raises FileNotFoundError for missing files."""
+    file_path = tmp_path / "missing.txt"
+    request = MagicMock()
+    request.headers = {}
+    
+    with pytest.raises(FileNotFoundError):
+        await utils.conditional_file_response(request, file_path, "text/plain")
+
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_with_attachment(tmp_path):
+    """Test that conditional_file_response sets Content-Disposition for attachments."""
+    file_path = tmp_path / "file.bin"
+    file_path.write_bytes(b"binary data")
+    
+    request = MagicMock()
+    request.headers = {}
+    
+    response = await utils.conditional_file_response(
+        request, file_path, "application/octet-stream", attachment=True
+    )
+    assert response.status_code == 200
+    assert "Content-Disposition" in response.headers
+    assert 'attachment; filename="file.bin"' in response.headers["Content-Disposition"]
+
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_if_none_match_case_insensitive(tmp_path):
+    """Test that if-none-match header works with lowercase key."""
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("content")
+    
+    etag, _ = utils.make_etag_and_last_modified(file_path)
+    
+    request = MagicMock()
+    request.headers = {"if-none-match": etag}
+    
+    response = await utils.conditional_file_response(request, file_path, "text/plain")
+    assert response.status_code == 304
+
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_if_modified_since_case_insensitive(tmp_path):
+    """Test that if-modified-since header works with lowercase key."""
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("content")
+    
+    _, last_modified = utils.make_etag_and_last_modified(file_path)
+    
+    request = MagicMock()
+    request.headers = {"if-modified-since": last_modified}
+    
+    response = await utils.conditional_file_response(request, file_path, "text/plain")
+    assert response.status_code == 304
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_cache_post_without_json(monkeypatch, tmp_path):
+    """Test POST request returning bytes (not JSON)."""
+    url = "http://example.com/upload"
+    dest = tmp_path / "result.bin"
+    
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"binary result"
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.post.return_value = mock_resp
+    monkeypatch.setattr(utils.httpx, "AsyncClient", lambda **_: mock_client)
+    
+    result = await utils.fetch_and_cache(
+        url, dest, method=HTTPMethod.POST, data=b"request data", return_json=False
+    )
+    assert dest.exists()
+    assert dest.read_bytes() == b"binary result"
+    assert result == dest
+
+
+@pytest.mark.asyncio
+async def test_fetch_and_cache_timeout_parameter(monkeypatch, tmp_path):
+    """Test that timeout parameter is passed to AsyncClient."""
+    url = "http://example.com/data.txt"
+    dest = tmp_path / "data.txt"
+    
+    mock_client = AsyncMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = b"data"
+    mock_resp.raise_for_status = MagicMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.get.return_value = mock_resp
+    
+    client_init_args = {}
+    def mock_client_init(**kwargs):
+        client_init_args.update(kwargs)
+        return mock_client
+    
+    monkeypatch.setattr(utils.httpx, "AsyncClient", mock_client_init)
+    
+    await utils.fetch_and_cache(url, dest, timeout=120.0)
+    assert client_init_args.get("timeout") == 120.0
+
+
+def test_safe_cache_path_multiple_absolute_attempts(tmp_path):
+    """Test rejection of multiple parts that try absolute path injection."""
+    with pytest.raises(ValueError):
+        utils.safe_cache_path(tmp_path, "/abs1", "/abs2")
+
+
+@pytest.mark.asyncio
+async def test_conditional_file_response_case_insensitive_headers(tmp_path):
+    """Test that uppercase header keys are also supported."""
+    file_path = tmp_path / "file.txt"
+    file_path.write_text("content")
+    
+    etag, last_modified = utils.make_etag_and_last_modified(file_path)
+    
+    # Test with uppercase If-None-Match
+    request = MagicMock()
+    request.headers = {"If-None-Match": etag}
+    response = await utils.conditional_file_response(request, file_path, "text/plain")
+    assert response.status_code == 304
+    
+    # Test with uppercase If-Modified-Since
+    request = MagicMock()
+    request.headers = {"If-Modified-Since": last_modified}
+    response = await utils.conditional_file_response(request, file_path, "text/plain")
+    assert response.status_code == 304

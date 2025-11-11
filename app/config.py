@@ -28,22 +28,17 @@ CACHE_DIR = Path(os.environ.get("NEXUS_CACHE_DIR", "cache"))
 
 # PyPI TTL settings
 PYPI_METADATA_TTL_HOURS: int = int(os.environ.get("PYPI_METADATA_TTL_HOURS", "24"))
-PYPI_PACKAGE_TTL_HOURS: int = int(os.environ.get("PYPI_PACKAGE_TTL_HOURS", "0"))  # Immutable artifacts
 
 # NPM TTL settings
 NPM_METADATA_TTL_HOURS: int = int(os.environ.get("NPM_METADATA_TTL_HOURS", "24"))
-NPM_TARBALL_TTL_HOURS: int = int(os.environ.get("NPM_TARBALL_TTL_HOURS", "0"))  # Immutable artifacts
-NPM_SECURITY_TTL_HOURS: int = int(os.environ.get("NPM_SECURITY_TTL_HOURS", "6"))
 
 # Maven TTL settings
 MAVEN_METADATA_TTL_HOURS: int = int(os.environ.get("MAVEN_METADATA_TTL_HOURS", "24"))
-MAVEN_ARTIFACT_TTL_HOURS: int = int(os.environ.get("MAVEN_ARTIFACT_TTL_HOURS", "0"))  # Immutable artifacts
-MAVEN_SNAPSHOT_TTL_HOURS: int = int(os.environ.get("MAVEN_SNAPSHOT_TTL_HOURS", "1"))  # Snapshots change frequently
 
 # Upstream registry URLs (configurable)
 NPM_REGISTRY: str = os.environ.get("NPM_REGISTRY", "https://registry.npmjs.org")
 PYPI_REGISTRY: str = os.environ.get("PYPI_REGISTRY", "https://pypi.org")
-MAVEN_CENTRAL: str = os.environ.get("MAVEN_CENTRAL", "https://repo1.maven.org/maven2")
+MAVEN_REGISTRY: str = os.environ.get("MAVEN_CENTRAL", "https://repo1.maven.org/maven2")
 
 # Network settings
 REQUEST_TIMEOUT_SECONDS: int = int(os.environ.get("REQUEST_TIMEOUT_SECONDS", "30"))

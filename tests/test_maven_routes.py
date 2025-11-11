@@ -108,3 +108,104 @@ async def test_maven_proxy_rejects_traversal_path():
     with pytest.raises(HTTPException) as exc_info:
         await maven_routes.maven_proxy(test_path, request=AsyncMock())
     assert exc_info.value.status_code == 400
+
+
+# ========================================
+# Additional Coverage Tests
+# ========================================
+
+@pytest.mark.asyncio
+@patch("app.routes.maven_routes.utils.is_cache_stale", return_value=True)
+@patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock)
+@patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock)
+async def test_maven_proxy_metadata_stale_refresh(mock_fetch, mock_response, mock_stale):
+    """Test that stale metadata (.xml, .pom) is refreshed."""
+    test_path = "com/example/test/1.0/test-1.0.pom"
+    
+    with patch.object(Path, "exists", return_value=True):
+        mock_response.return_value = b"pom content"
+        response = await maven_routes.maven_proxy(test_path, request=AsyncMock())
+        mock_fetch.assert_called_once()
+        mock_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("app.routes.maven_routes.utils.is_cache_stale", return_value=False)
+@patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock)
+@patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock)
+async def test_maven_proxy_metadata_fresh_cache(mock_fetch, mock_response, mock_stale):
+    """Test that fresh metadata is not re-fetched."""
+    test_path = "com/example/test/1.0/test-1.0.pom"
+    
+    with patch.object(Path, "exists", return_value=True):
+        mock_response.return_value = b"pom content"
+        response = await maven_routes.maven_proxy(test_path, request=AsyncMock())
+        mock_fetch.assert_not_called()
+        mock_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+@patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock)
+@patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock)
+async def test_maven_proxy_artifact_cached(mock_fetch, mock_response):
+    """Test that artifact files (.jar) are never refreshed when cached."""
+    test_path = "com/example/test/1.0/test-1.0.jar"
+    
+    with patch.object(Path, "exists", return_value=True):
+        mock_response.return_value = b"jar content"
+        response = await maven_routes.maven_proxy(test_path, request=AsyncMock())
+        mock_fetch.assert_not_called()
+        mock_response.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_maven_proxy_raises_validation_error():
+    """Test that ValidationError from safe_join_path raises HTTPException(400)."""
+    from app.validators import ValidationError
+    
+    with patch("app.routes.maven_routes.safe_join_path", side_effect=ValidationError("Invalid path")):
+        with pytest.raises(HTTPException) as exc_info:
+            await maven_routes.maven_proxy("com/example/test", request=AsyncMock())
+        assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_maven_proxy_metadata_sha1():
+    """Test that .sha1 files are treated as metadata."""
+    test_path = "com/example/test/1.0/test-1.0.jar.sha1"
+    
+    with patch("app.routes.maven_routes.utils.is_cache_stale", return_value=True) as mock_stale:
+        with patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock) as mock_response:
+            with patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock) as mock_fetch:
+                with patch.object(Path, "exists", return_value=True):
+                    mock_response.return_value = b"sha1hash"
+                    await maven_routes.maven_proxy(test_path, request=AsyncMock())
+                    mock_fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_maven_proxy_metadata_md5():
+    """Test that .md5 files are treated as metadata."""
+    test_path = "com/example/test/1.0/test-1.0.jar.md5"
+    
+    with patch("app.routes.maven_routes.utils.is_cache_stale", return_value=True) as mock_stale:
+        with patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock) as mock_response:
+            with patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock) as mock_fetch:
+                with patch.object(Path, "exists", return_value=True):
+                    mock_response.return_value = b"md5hash"
+                    await maven_routes.maven_proxy(test_path, request=AsyncMock())
+                    mock_fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_maven_proxy_metadata_xml():
+    """Test that .xml files are treated as metadata."""
+    test_path = "com/example/test/maven-metadata.xml"
+    
+    with patch("app.routes.maven_routes.utils.is_cache_stale", return_value=True) as mock_stale:
+        with patch("app.routes.maven_routes.utils.conditional_file_response", new_callable=AsyncMock) as mock_response:
+            with patch("app.routes.maven_routes.utils.fetch_and_cache", new_callable=AsyncMock) as mock_fetch:
+                with patch.object(Path, "exists", return_value=True):
+                    mock_response.return_value = b"<metadata></metadata>"
+                    await maven_routes.maven_proxy(test_path, request=AsyncMock())
+                    mock_fetch.assert_called_once()

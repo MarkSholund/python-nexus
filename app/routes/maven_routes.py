@@ -23,7 +23,7 @@ import app.config as config
 import app.utils as utils
 from app.validators import validate_maven_path, safe_join_path, ValidationError
 
-MAVEN_UPSTREAM = "https://repo1.maven.org/maven2"
+MAVEN_UPSTREAM = config.MAVEN_REGISTRY
 MAVEN_CACHE = config.CACHE_DIR / "maven"
 
 router = APIRouter(prefix="/maven2", tags=["Maven"])

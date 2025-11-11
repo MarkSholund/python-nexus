@@ -31,7 +31,7 @@ from app.validators import (
     ValidationError
 )
 
-NPM_UPSTREAM = "https://registry.npmjs.org"
+NPM_UPSTREAM = config.NPM_REGISTRY
 NPM_CACHE = config.CACHE_DIR / "npm"
 
 router = APIRouter(prefix="/npm", tags=["npm"])
@@ -70,7 +70,7 @@ async def npm_package_metadata(package: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     # Use is_cache_stale from utils.py for 24h staleness check
-    if utils.is_cache_stale(local_path, max_age_hours=24):
+    if utils.is_cache_stale(local_path, max_age_hours=config.NPM_METADATA_TTL_HOURS):
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}"
         await utils.fetch_and_cache(upstream_url, local_path)
 
@@ -126,6 +126,7 @@ async def npm_security_bulk(request: Request):
     """
     Proxy npm audit bulk requests.
     Save response to cache based on a hash of the POST body.
+    Invalidate cache if older than 24 hours (for security advisories).
     """
     import hashlib
 
@@ -139,16 +140,22 @@ async def npm_security_bulk(request: Request):
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if local_path.exists():
-        try:
-            return await utils.conditional_file_response(
-                request, local_path, "application/json"
-            )
-        except FileNotFoundError:
-            pass
+    # Use is_cache_stale from utils.py for 24h staleness check
+    if utils.is_cache_stale(local_path, max_age_hours=config.NPM_METADATA_TTL_HOURS):
+        upstream_url = f"{NPM_UPSTREAM}/-/npm/v1/security/advisories/bulk"
+        data = await utils.fetch_and_cache(
+            upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes
+        )
+        return data
 
-    upstream_url = f"{NPM_UPSTREAM}/-/npm/v1/security/advisories/bulk"
-    data = await utils.fetch_and_cache(
-        upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes
-    )
-    return data
+    try:
+        return await utils.conditional_file_response(
+            request, local_path, "application/json"
+        )
+    except FileNotFoundError:
+        # Cache miss or staleness check: fetch from upstream
+        upstream_url = f"{NPM_UPSTREAM}/-/npm/v1/security/advisories/bulk"
+        data = await utils.fetch_and_cache(
+            upstream_url, local_path, method=HTTPMethod.POST, data=body_bytes
+        )
+        return data

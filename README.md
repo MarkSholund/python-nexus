@@ -17,6 +17,12 @@ A simple **FastAPI-based proxy server** for caching and serving Maven and PyPI a
   - Fetches missing packages from [PyPI](https://pypi.org).
   - Supports conditional GET with ETag and Last-Modified headers.
 
+- **NPM Proxy**
+  - Serves package metadata (registry JSON) and on-demand tarballs.
+  - Metadata is cached under `cache/npm/...`; tarballs are fetched and cached when requested.
+  - Fetches metadata and tarballs from `https://registry.npmjs.org`.
+  - Scoped packages (e.g. `@scope/name`) are encoded when composing upstream URLs.
+
 ---
 
 ## Installation
@@ -98,6 +104,14 @@ GET /pypi/simple/{package}/          # Package index HTML
 GET /pypi/{package}/json             # Package JSON metadata
 GET /pypi/{package}/{version}/json   # Version-specific JSON
 GET /pypi/packages/{path}            # Package files (wheel, tar, zip, etc.)
+
+- **NPM proxy**
+
+```
+GET /npm/{package}                   # Package metadata JSON (cached)
+GET /npm/{package}/-/{tarball}       # Package tarball (fetched on-demand)
+POST /npm/-/npm/v1/security/advisories/bulk  # Proxies npm audit bulk requests (cached by body hash)
+```
 ```
 
 ---
@@ -110,6 +124,10 @@ GET /pypi/packages/{path}            # Package files (wheel, tar, zip, etc.)
 - Upstream errors return proper HTTP status codes:
   - `404` for not found
   - `502` or upstream status code for other errors
+
+- NPM-specific caching notes:
+  - The server caches package metadata JSON under `cache/npm/{package}/index.json`.
+  - Tarballs are not prefetched: requests to `/npm/{package}/-/{tarball}` fetch the tarball from the upstream registry and save it under `cache/npm/...`.
 
 ---
 
@@ -136,10 +154,20 @@ logging.basicConfig(
 - You can override cache directory with:
 
 ```bash
-export CACHE_DIR=/path/to/cache
+export NEXUS_CACHE_DIR=/path/to/cache
 ```
 
 - Default is `cache`.
+
+Notes on cache ownership and symlink safety
+
+- The server enforces strict path containment for all cache operations. Key helpers are in `app/utils/utils.py`:
+  - `safe_cache_path` validates and builds cache paths from user input.
+  - `fetch_and_cache` verifies destinations are under the configured cache root and writes atomically (temp file + `os.replace`).
+  - `conditional_file_response` re-resolves files before serving and supports conditional GETs (ETag / Last-Modified).
+
+- For safety, run the service with a `NEXUS_CACHE_DIR` owned by the same user as the process and not writable by untrusted local users. This reduces symlink or replacement race risks.
+
 
 ---
 
