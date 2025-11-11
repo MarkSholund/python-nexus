@@ -286,3 +286,26 @@ def is_cache_stale(path: Path, max_age_hours: int = 24) -> bool:
     except (OSError, FileNotFoundError):
         # If we can't stat the file (e.g., parent dir doesn't exist), consider it stale
         return True
+
+
+async def fetch_and_serve_json(url: str, local_path: Path, request: Request) -> Response:
+    """
+    Helper to fetch JSON from upstream into a given local cache path and return
+    a conditional JSON response. Caller is responsible for validating/constructing
+    `local_path` (use `safe_join_path` in route handlers).
+
+    Args:
+        url: Upstream URL to fetch JSON from
+        local_path: Destination Path inside configured cache
+        request: FastAPI Request object (for conditional response headers)
+
+    Returns:
+        fastapi.Response containing JSON content (or raises HTTPException/FileNotFoundError)
+    """
+    # Ensure parent dir exists
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not local_path.exists():
+        await fetch_and_cache(url, local_path, return_json=False)
+
+    return await conditional_file_response(request, local_path, "application/json")

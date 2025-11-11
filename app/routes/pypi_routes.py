@@ -150,37 +150,6 @@ async def pypi_artifact(path: str, request: Request):
         raise HTTPException(status_code=404, detail="Artifact not found")
 
 
-async def _fetch_cached_json_metadata(
-    package: str,
-    url: str,
-    path_parts: list[str],
-    request: Request,
-    ttl_hours: int = None,
-):
-    """
-    Generic helper for fetching and serving cached JSON metadata.
-
-    Args:
-        package: Package name (for validation)
-        url: Upstream URL to fetch from
-        path_parts: Path components for safe_join_path (e.g., ["package", "index.json"])
-        request: FastAPI Request object
-        ttl_hours: Cache TTL in hours (optional, for future use)
-
-    Returns:
-        Response with JSON metadata
-    """
-    try:
-        local_path = safe_join_path(PYPI_CACHE, *path_parts)
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if not local_path.exists():
-        await utils.fetch_and_cache(url, local_path)
-
-    return await utils.conditional_file_response(request, local_path, "application/json")
-
-
 @router.get("/{package}/json")
 async def pypi_package_json(package: str, request: Request):
     # SECURITY: Validate package name
@@ -190,10 +159,14 @@ async def pypi_package_json(package: str, request: Request):
             detail=f"Invalid PyPI package name: {package}"
         )
 
-    return await _fetch_cached_json_metadata(
-        package=package,
+    try:
+        local_path = safe_join_path(PYPI_CACHE, package, "index.json")
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return await utils.fetch_and_serve_json(
         url=f"{PYPI_UPSTREAM}/pypi/{package}/json",
-        path_parts=[package, "index.json"],
+        local_path=local_path,
         request=request,
     )
 
@@ -212,9 +185,14 @@ async def pypi_package_version_json(package: str, version: str, request: Request
             status_code=400,
             detail=f"Invalid version string: {version}"
         )
-    return await _fetch_cached_json_metadata(
-        package=package,
+
+    try:
+        local_path = safe_join_path(PYPI_CACHE, package, version, "index.json")
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return await utils.fetch_and_serve_json(
         url=f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json",
-        path_parts=[package, version, "index.json"],
+        local_path=local_path,
         request=request,
     )
