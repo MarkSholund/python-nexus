@@ -20,7 +20,6 @@
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException, Request
-from datetime import datetime, timedelta
 import httpx
 import app.config as config
 import app.utils as utils
@@ -74,32 +73,6 @@ def rewrite_index_html(html: str, base_url: str) -> str:
     return str(soup)
 
 
-def should_refresh_cache(local_path, ttl_hours: int) -> bool:
-    """
-    Check if cached file should be refreshed based on TTL.
-
-    Args:
-        local_path: Path to the cached file
-        ttl_hours: Time-to-live in hours (0 = never refresh)
-
-    Returns:
-        True if file should be refreshed, False otherwise
-    """
-    # TTL disabled (0) - never refresh existing cache
-    if ttl_hours <= 0:
-        return False
-
-    # File doesn't exist - must fetch
-    if not local_path.exists():
-        return True
-
-    # Check file age
-    file_modified_time = datetime.fromtimestamp(local_path.stat().st_mtime)
-    age = datetime.now() - file_modified_time
-
-    return age > timedelta(hours=ttl_hours)
-
-
 @router.get("/simple/")
 async def pypi_root_index(request: Request):
     local_path = utils.safe_cache_path(PYPI_CACHE, "simple", "index.html")
@@ -137,7 +110,7 @@ async def pypi_package_index(package: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     # Check if cache needs refresh based on TTL configuration
-    if should_refresh_cache(local_path, config.PYPI_METADATA_TTL_HOURS):
+    if utils.is_cache_stale(local_path, max_age_hours=config.PYPI_METADATA_TTL_HOURS):
         url = f"{PYPI_UPSTREAM}/simple/{package}/"
         try:
             async with httpx.AsyncClient(follow_redirects=True, timeout=float(config.REQUEST_TIMEOUT_SECONDS)) as client:
@@ -177,6 +150,37 @@ async def pypi_artifact(path: str, request: Request):
         raise HTTPException(status_code=404, detail="Artifact not found")
 
 
+async def _fetch_cached_json_metadata(
+    package: str,
+    url: str,
+    path_parts: list[str],
+    request: Request,
+    ttl_hours: int = None,
+):
+    """
+    Generic helper for fetching and serving cached JSON metadata.
+
+    Args:
+        package: Package name (for validation)
+        url: Upstream URL to fetch from
+        path_parts: Path components for safe_join_path (e.g., ["package", "index.json"])
+        request: FastAPI Request object
+        ttl_hours: Cache TTL in hours (optional, for future use)
+
+    Returns:
+        Response with JSON metadata
+    """
+    try:
+        local_path = safe_join_path(PYPI_CACHE, *path_parts)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not local_path.exists():
+        await utils.fetch_and_cache(url, local_path)
+
+    return await utils.conditional_file_response(request, local_path, "application/json")
+
+
 @router.get("/{package}/json")
 async def pypi_package_json(package: str, request: Request):
     # SECURITY: Validate package name
@@ -186,15 +190,12 @@ async def pypi_package_json(package: str, request: Request):
             detail=f"Invalid PyPI package name: {package}"
         )
 
-    try:
-        local_path = safe_join_path(PYPI_CACHE, package, "index.json")
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if not local_path.exists():
-        await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/json", local_path)
-
-    return await utils.conditional_file_response(request, local_path, "application/json")
+    return await _fetch_cached_json_metadata(
+        package=package,
+        url=f"{PYPI_UPSTREAM}/pypi/{package}/json",
+        path_parts=[package, "index.json"],
+        request=request,
+    )
 
 
 @router.get("/{package}/{version}/json")
@@ -211,13 +212,9 @@ async def pypi_package_version_json(package: str, version: str, request: Request
             status_code=400,
             detail=f"Invalid version string: {version}"
         )
-
-    try:
-        local_path = safe_join_path(PYPI_CACHE, package, version, "index.json")
-    except ValidationError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if not local_path.exists():
-        await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json", local_path)
-
-    return await utils.conditional_file_response(request, local_path, "application/json")
+    return await _fetch_cached_json_metadata(
+        package=package,
+        url=f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json",
+        path_parts=[package, version, "index.json"],
+        request=request,
+    )

@@ -190,9 +190,8 @@ async def test_pypi_package_index_fresh_cache(mock_response, mock_stale):
     request_mock = AsyncMock()
     
     with patch.object(Path, "exists", return_value=True):
-        with patch("app.routes.pypi_routes.should_refresh_cache", return_value=False):
-            response = await pypi_routes.pypi_package_index("requests", request_mock)
-            mock_response.assert_called_once()
+        response = await pypi_routes.pypi_package_index("requests", request_mock)
+        mock_response.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -273,16 +272,16 @@ async def test_pypi_root_index_file_not_found(mock_response):
 
 
 @pytest.mark.asyncio
+@patch("app.routes.pypi_routes.utils.is_cache_stale", return_value=False)
 @patch("app.routes.pypi_routes.utils.conditional_file_response", 
        new_callable=AsyncMock)
-async def test_pypi_package_index_file_not_found(mock_response):
+async def test_pypi_package_index_file_not_found(mock_response, mock_stale):
     """Test FileNotFoundError handling for package index."""
     request_mock = AsyncMock()
     mock_response.side_effect = FileNotFoundError("Not found")
     with patch.object(Path, "exists", return_value=True):
-        with patch("app.routes.pypi_routes.should_refresh_cache", return_value=False):
-            with pytest.raises(FileNotFoundError):
-                await pypi_routes.pypi_package_index("requests", request_mock)
+        with pytest.raises(FileNotFoundError):
+            await pypi_routes.pypi_package_index("requests", request_mock)
 
 
 @pytest.mark.asyncio
