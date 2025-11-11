@@ -1,9 +1,37 @@
+import time
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
 from pathlib import Path
 from app.routes import npm_routes
+
+
+# Test cache staleness logic for npm metadata
+@pytest.mark.asyncio
+@patch("app.routes.npm_routes.utils.is_cache_stale", return_value=True)
+@patch("app.routes.npm_routes.utils.conditional_file_response", new_callable=AsyncMock)
+@patch("app.routes.npm_routes.utils.fetch_and_cache", new_callable=AsyncMock)
+async def test_npm_package_metadata_stale_refresh(mock_fetch, mock_response, mock_stale):
+    test_package = "lodash"
+    with patch.object(Path, "exists", return_value=True):
+        mock_response.return_value = {"name": "lodash"}
+        await npm_routes.npm_package_metadata(test_package, request=AsyncMock())
+        mock_fetch.assert_called_once()
+        mock_response.assert_called_once()
+
+# Test cache freshness logic for npm metadata
+@pytest.mark.asyncio
+@patch("app.routes.npm_routes.utils.is_cache_stale", return_value=False)
+@patch("app.routes.npm_routes.utils.conditional_file_response", new_callable=AsyncMock)
+@patch("app.routes.npm_routes.utils.fetch_and_cache", new_callable=AsyncMock)
+async def test_npm_package_metadata_fresh_cache(mock_fetch, mock_response, mock_stale):
+    test_package = "lodash"
+    with patch.object(Path, "exists", return_value=True):
+        mock_response.return_value = {"name": "lodash"}
+        await npm_routes.npm_package_metadata(test_package, request=AsyncMock())
+        mock_fetch.assert_not_called()
+        mock_response.assert_called_once()
 
 client = TestClient(npm_routes.router)
 
@@ -32,14 +60,14 @@ async def test_npm_package_metadata_fetch(mock_fetch, mock_response):
 
 
 @pytest.mark.asyncio
+@patch("app.routes.npm_routes.utils.is_cache_stale", return_value=False)
 @patch("app.routes.npm_routes.utils.conditional_file_response", new_callable=AsyncMock)
 @patch("app.routes.npm_routes.utils.fetch_and_cache", new_callable=AsyncMock)
-async def test_npm_package_metadata_cached(mock_fetch, mock_response):
+async def test_npm_package_metadata_cached(mock_fetch, mock_response, mock_stale):
     test_package = "lodash"
 
     # File exists -> fetch_and_cache should NOT be called
-    with patch.object(Path, "exists", return_value=True
-    ):
+    with patch.object(Path, "exists", return_value=True):
         mock_response.return_value = {"name": "lodash"}
         response = await npm_routes.npm_package_metadata(test_package, request=AsyncMock())
         mock_fetch.assert_not_called()

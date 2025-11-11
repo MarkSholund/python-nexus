@@ -69,7 +69,8 @@ async def npm_package_metadata(package: str, request: Request):
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if not local_path.exists():
+    # Use is_cache_stale from utils.py for 24h staleness check
+    if utils.is_cache_stale(local_path, max_age_hours=24):
         upstream_url = f"{NPM_UPSTREAM}/{encode_scoped_package(package)}"
         await utils.fetch_and_cache(upstream_url, local_path)
 
