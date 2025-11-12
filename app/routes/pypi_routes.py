@@ -20,6 +20,7 @@
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from fastapi import APIRouter, HTTPException, Request
+from datetime import datetime, timedelta
 import httpx
 import app.config as config
 import app.utils as utils
@@ -33,7 +34,7 @@ from app.validators import (
 
 router = APIRouter(prefix="/pypi", tags=["PyPI"])
 
-PYPI_UPSTREAM = config.PYPI_REGISTRY
+PYPI_UPSTREAM = "https://pypi.org"
 PYPI_CACHE = config.CACHE_DIR / "pypi"
 
 
@@ -79,7 +80,7 @@ async def pypi_root_index(request: Request):
 
     # Check if cache is stale (older than 24 hours)
     if utils.is_cache_stale(local_path, max_age_hours=config.PYPI_METADATA_TTL_HOURS):
-        async with httpx.AsyncClient(follow_redirects=True, timeout=float(config.REQUEST_TIMEOUT_SECONDS)) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
             r = await client.get(f"{PYPI_UPSTREAM}/simple/")
             if r.status_code != 200:
                 raise HTTPException(status_code=r.status_code)
@@ -90,6 +91,7 @@ async def pypi_root_index(request: Request):
     return await utils.conditional_file_response(request, local_path, "text/html")
 
 
+@router.get("/simple/{package}/")
 async def pypi_package_index(package: str, request: Request):
     """
     Serve the simple API page for a given package.
@@ -110,10 +112,10 @@ async def pypi_package_index(package: str, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     # Check if cache needs refresh based on TTL configuration
-    if utils.is_cache_stale(local_path, max_age_hours=config.PYPI_METADATA_TTL_HOURS):
+    if utils.is_cache_stale(local_path, config.PYPI_METADATA_TTL_HOURS):
         url = f"{PYPI_UPSTREAM}/simple/{package}/"
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=float(config.REQUEST_TIMEOUT_SECONDS)) as client:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
                 r = await client.get(url)
                 if r.status_code == 200:
                     rewritten = rewrite_index_html(r.text, base_url="/pypi")
@@ -164,11 +166,10 @@ async def pypi_package_json(package: str, request: Request):
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return await utils.fetch_and_serve_json(
-        url=f"{PYPI_UPSTREAM}/pypi/{package}/json",
-        local_path=local_path,
-        request=request,
-    )
+    if not local_path.exists():
+        await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/json", local_path)
+
+    return await utils.conditional_file_response(request, local_path, "application/json")
 
 
 @router.get("/{package}/{version}/json")
@@ -191,8 +192,7 @@ async def pypi_package_version_json(package: str, version: str, request: Request
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    return await utils.fetch_and_serve_json(
-        url=f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json",
-        local_path=local_path,
-        request=request,
-    )
+    if not local_path.exists():
+        await utils.fetch_and_cache(f"{PYPI_UPSTREAM}/pypi/{package}/{version}/json", local_path)
+
+    return await utils.conditional_file_response(request, local_path, "application/json")

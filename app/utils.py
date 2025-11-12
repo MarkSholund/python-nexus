@@ -42,7 +42,7 @@ logger = logging.getLogger("uvicorn")
 def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
     """
     Build a safe path within cache_root from user-supplied components.
-    Rejects absolute paths or attempts to traverse outside the cache.
+    Rejects absolute paths, drive letters, UNC paths, and traversal attempts.
     Works cross-platform (POSIX/Windows).
     """
     cache_root = cache_root.resolve()
@@ -52,20 +52,23 @@ def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
         if p is None:
             continue
 
-        p_obj = Path(p)
+        if not isinstance(p, str):
+            p = str(p)
 
-        # Reject absolute paths (POSIX or Windows)
+        # --- Windows-specific checks ---
+        if len(p) >= 2 and p[1] == ":":
+            raise ValueError(f"Drive letter path not allowed: {p}")
+        if p.startswith("\\\\"):
+            raise ValueError(f"UNC path not allowed: {p}")
+        if p.startswith("\\"):
+            raise ValueError(f"Absolute path not allowed: {p}")
+
+        # --- General absolute path checks ---
+        p_obj = Path(p)
         if p_obj.is_absolute():
             raise ValueError(f"Absolute path not allowed: {p}")
 
-        # Explicitly reject UNC or drive-letter style paths
-        if isinstance(p, str):
-            if p.startswith(("/", "\\")):
-                raise ValueError(f"Absolute path not allowed: {p}")
-            if len(p) >= 2 and p[1] == ":":
-                raise ValueError(f"Drive letter path not allowed: {p}")
-
-        # Reject traversal or invalid segments
+        # --- Reject traversal segments ---
         for seg in p_obj.parts:
             if seg in ("..", "/", "\\"):
                 raise ValueError(f"Path traversal not allowed: {p}")
@@ -76,18 +79,15 @@ def safe_cache_path(cache_root: Path, *parts: Iterable[str]) -> Path:
     try:
         candidate_abs = candidate.resolve(strict=False)
     except (FileNotFoundError, TypeError):
-        # Fallback: resolve the parent and rebuild
         parent_resolved = candidate.parent.resolve()
         candidate_abs = parent_resolved.joinpath(candidate.name)
 
-    # Ensure candidate stays inside the cache root
     try:
         candidate_abs.relative_to(cache_root)
     except ValueError:
         raise ValueError(f"Refused unsafe path outside cache: {candidate_abs}")
 
     return candidate_abs
-
 # ----------------------------------------------------------------------
 # Network fetch + local caching (atomic, safe)
 # ----------------------------------------------------------------------
@@ -269,11 +269,11 @@ async def conditional_file_response(
 def is_cache_stale(path: Path, max_age_hours: int = 24) -> bool:
     """
     Check if cached file is stale and needs refreshing.
-    
+
     Args:
         path: Path to cached file
         max_age_hours: Maximum age in hours before considering stale
-        
+
     Returns:
         True if file doesn't exist or is older than max_age_hours
     """

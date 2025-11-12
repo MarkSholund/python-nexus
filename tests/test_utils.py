@@ -266,7 +266,8 @@ def test_safe_cache_path_rejects_drive_letter(tmp_path):
     """Test drive letter rejection (Windows)."""
     with pytest.raises(ValueError, match="Drive letter path not allowed"):
         utils.safe_cache_path(tmp_path, "C:\\evil")
-
+    # with pytest.raises(ValueError, match="Absolute path not allowed"):
+    #     utils.safe_cache_path(tmp_path, "C:\\evil")
 
 def test_safe_cache_path_handles_none_parts(tmp_path):
     """Test that None parts are skipped."""
